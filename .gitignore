@@ -1,0 +1,20 @@
+# 个人配置与数据（绝不提交！含 API Key 和个人文件记录）
+config.json
+cache.json
+cache.json.bak
+undo.json
+logs/
+
+# 打包产物（exe 通过 Release 发布，不进 git）
+dist/
+build/
+*.exe
+*.zip
+*.spec.bak
+
+# Python
+__pycache__/
+*.pyc
+
+# 构建日志
+rebuild*.log

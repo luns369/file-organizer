@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 文件整理助手</title>
+<style>
+  :root {
+    --bg: #f4f6f8;
+    --card: #ffffff;
+    --border: #e3e8ee;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --brand: #16a34a;
+    --brand-dark: #15803d;
+    --brand-soft: #ecfdf5;
+    --danger: #dc2626;
+    --radius: 14px;
+    --shadow: 0 1px 3px rgba(15, 23, 42, .06), 0 4px 16px rgba(15, 23, 42, .05);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 32px 16px 48px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 24px;
+  }
+  header h1 { font-size: 22px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .logo {
+    width: 34px; height: 34px; border-radius: 10px; background: var(--brand);
+    display: inline-flex; align-items: center; justify-content: center; color: #fff; font-size: 16px;
+  }
+  .badge {
+    font-size: 12px; color: var(--muted); background: #fff; border: 1px solid var(--border);
+    padding: 5px 12px; border-radius: 999px;
+  }
+  .badge.running { color: var(--brand-dark); background: var(--brand-soft); border-color: #bbe7c8; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 20px 22px; margin-bottom: 18px;
+  }
+  .card h2 { font-size: 15px; font-weight: 600; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .card h2 .step {
+    width: 22px; height: 22px; border-radius: 7px; background: var(--brand); color: #fff;
+    font-size: 12px; display: inline-flex; align-items: center; justify-content: center; font-weight: 600;
+  }
+
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: #374151; }
+  .field .hint { font-size: 12px; color: var(--muted); margin-top: 5px; line-height: 1.6; }
+  input[type=text], input[type=password] {
+    width: 100%; padding: 10px 12px; font-size: 14px; border: 1px solid var(--border);
+    border-radius: 9px; outline: none; transition: border-color .15s, box-shadow .15s; background: #fff;
+  }
+  input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(22,163,74,.12); }
+
+  .row { display: flex; gap: 10px; }
+  .row .grow { flex: 1; }
+
+  .btn {
+    border: none; cursor: pointer; border-radius: 10px; font-size: 14px; font-weight: 600;
+    padding: 12px 18px; display: inline-flex; align-items: center; gap: 8px; justify-content: center;
+    transition: transform .08s, box-shadow .15s, opacity .15s; color: #fff;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn.primary { background: var(--brand); box-shadow: 0 2px 8px rgba(22,163,74,.28); }
+  .btn.primary:hover { background: var(--brand-dark); }
+  .btn.ghost { background: #fff; color: var(--text); border: 1px solid var(--border); }
+  .btn.ghost:hover { background: #f8fafc; }
+  .btn.warn { background: #fff; color: var(--danger); border: 1px solid #f3c1c1; }
+  .btn.warn:hover { background: #fef2f2; }
+  .btn.small { padding: 9px 14px; font-size: 13px; border-radius: 9px; }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+  .actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .actions .btn { width: 100%; padding: 16px 10px; flex-direction: column; gap: 7px; font-size: 13.5px; }
+  .actions .btn svg { width: 22px; height: 22px; }
+
+  .logbox {
+    background: #0f172a; color: #dbeafe; border-radius: 10px; padding: 14px 16px;
+    font-family: Consolas, "Courier New", monospace; font-size: 12.5px; line-height: 1.7;
+    height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+  }
+  .logbox .ok-line { color: #86efac; }
+  .logbox .bar { color: #fcd34d; }
+
+  .statusline { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; font-size: 13px; color: var(--muted); }
+  .spinner {
+    width: 14px; height: 14px; border: 2px solid #c7e7d2; border-top-color: var(--brand);
+    border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; vertical-align: -2px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .hidden { display: none; }
+
+  footer { text-align: center; color: var(--muted); font-size: 12.5px; margin-top: 22px; line-height: 2; }
+  footer button { background: none; border: none; color: var(--muted); text-decoration: underline; cursor: pointer; font-size: 12.5px; }
+  footer button:hover { color: var(--danger); }
+
+  .toast {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    background: #111827; color: #fff; padding: 10px 20px; border-radius: 999px; font-size: 13px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.2); z-index: 99; opacity: 0; transition: opacity .25s;
+    pointer-events: none; max-width: 90vw;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="logo">AI</span>文件整理助手</h1>
+    <span class="badge" id="statusBadge">空闲</span>
+  </header>
+
+  <div class="toast" id="toast"></div>
+
+  <section class="card">
+    <h2><span class="step">1</span>基本设置</h2>
+    <div class="field">
+      <label for="folder">要整理的文件夹路径</label>
+      <div class="row">
+        <input type="text" id="folder" class="grow" placeholder="例如：D:\我的文件">
+        <button class="btn ghost small" id="btnOpenFolder" type="button">打开文件夹</button>
+      </div>
+      <div class="hint">把需要整理的 word / pdf / ppt / txt 文件放进这个文件夹（可含子文件夹）。</div>
+    </div>
+    <div class="field">
+      <label for="apiKey">DeepSeek API 密钥</label>
+      <input type="password" id="apiKey" placeholder="留空表示不修改">
+      <div class="hint">填一次保存在本机，不会上传到任何地方。获取地址：platform.deepseek.com</div>
+    </div>
+    <div style="text-align:right">
+      <button class="btn primary small" id="btnSave" type="button">保存设置</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step">2</span>执行操作</h2>
+    <div class="actions">
+      <button class="btn primary" id="btnAnalyze" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M12 3v9l5 3"/></svg>
+        开始分析
+        <span style="font-weight:400;font-size:12px;color:#d1fae5">扫描 + AI 分类 → 生成总表</span>
+      </button>
+      <button class="btn primary" id="btnOrganize" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18"/><path d="M3 12h18"/><path d="M3 17h18"/></svg>
+        开始归档
+        <span style="font-weight:400;font-size:12px;color:#d1fae5">按总表分类移动文件</span>
+      </button>
+      <button class="btn warn" id="btnUndo" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
+        撤销归档
+        <span style="font-weight:400;font-size:12px;color:#fecaca">恢复到归档前位置</span>
+      </button>
+      <button class="btn ghost" id="btnOpenExcel" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 9v12"/></svg>
+        打开总表
+        <span style="font-weight:400;font-size:12px;color:#6b7280">在 Excel 里检查和改分类</span>
+      </button>
+    </div>
+    <div class="statusline">
+      <span id="statusText">就绪</span>
+      <span id="statusRight"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step">3</span>运行日志</h2>
+    <div class="logbox" id="logbox">等待开始……</div>
+  </section>
+
+  <footer>
+    建议流程：设置文件夹和密钥 → 开始分析 → 打开总表检查/修改分类 → 开始归档 → 不满意可撤销。
+    <br>
+    <button id="btnShutdown" type="button">关闭本服务</button>
+  </footer>
+</div>
+
+<script>
+let currentTask = null;   // 当前正在轮询的任务名
+let logOffset = 0;
+let pollTimer = null;
+
+const $ = id => document.getElementById(id);
+const toast = (msg) => {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove("show"), 2600);
+};
+
+function setBusy(busy) {
+  $("btnAnalyze").disabled = busy;
+  $("btnOrganize").disabled = busy;
+  $("btnUndo").disabled = busy;
+  $("btnSave").disabled = busy;
+}
+
+async function loadConfig() {
+  try {
+    const d = await (await fetch("/api/config")).json();
+    $("folder").value = d.source_folder || "";
+    $("apiKey").value = d.api_key || "";
+    $("apiKey").placeholder = d.api_key ? "已设置：" + d.api_key + "（留空不修改）" : "留空表示不修改";
+    updateBadge(d.running);
+    if (d.running) { currentTask = d.running; startPolling(); }
+  } catch (e) { toast("无法连接本服务，请确认 app.py 正在运行"); }
+}
+
+function updateBadge(running) {
+  const b = $("statusBadge");
+  if (running) { b.textContent = "运行中：" + running; b.classList.add("running"); }
+  else { b.textContent = "空闲"; b.classList.remove("running"); }
+}
+
+$("btnSave").onclick = async () => {
+  const body = { source_folder: $("folder").value.trim() };
+  const key = $("apiKey").value.trim();
+  if (key) body.api_key = key;
+  const d = await (await fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  })).json();
+  $("apiKey").value = "";
+  $("apiKey").placeholder = d.api_key ? "已设置：" + d.api_key + "（留空不修改）" : "留空表示不修改";
+  toast("设置已保存");
+};
+
+function startTask(name) {
+  fetch("/api/run/" + name, { method: "POST" })
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) { toast(d.msg); return; }
+      currentTask = name;
+      logOffset = 0;
+      $("logbox").textContent = "";
+      $("statusText").textContent = d.msg;
+      setBusy(true);
+      updateBadge(name);
+      pollTimer = setInterval(poll, 700);
+    });
+}
+
+function poll() {
+  fetch(`/api/log/${currentTask}?offset=${logOffset}`)
+    .then(r => r.json())
+    .then(d => {
+      if (d.text) {
+        $("logbox").textContent += d.text;
+        $("logbox").scrollTop = $("logbox").scrollHeight;
+      }
+      logOffset = d.offset;
+      if (d.done) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        setBusy(false);
+        updateBadge(null);
+        currentTask = null;
+        const ok = d.exit_code === 0;
+        $("statusText").innerHTML = ok
+          ? '<span style="color:#16a34a;font-weight:600">任务完成</span>'
+          : '<span style="color:#dc2626;font-weight:600">任务出错，请查看上方日志</span>';
+      }
+    })
+    .catch(() => { clearInterval(pollTimer); setBusy(false); toast("连接中断"); });
+}
+
+$("btnAnalyze").onclick = () => startTask("analyze");
+$("btnOrganize").onclick = () => startTask("organize");
+$("btnUndo").onclick = () => startTask("undo");
+$("btnOpenExcel").onclick = async () => {
+  const d = await (await fetch("/api/open_excel")).json();
+  if (!d.ok) toast(d.msg);
+};
+$("btnOpenFolder").onclick = async () => {
+  const d = await (await fetch("/api/open_folder")).json();
+  if (!d.ok) toast(d.msg);
+};
+$("btnShutdown").onclick = async () => {
+  await fetch("/api/shutdown", { method: "POST" });
+  toast("服务已关闭，可以关闭窗口了");
+  setTimeout(() => setBusy(true), 200);
+};
+
+loadConfig();
+</script>
+</body>
+</html>
