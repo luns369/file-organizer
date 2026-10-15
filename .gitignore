@@ -1,5 +1,7 @@
 # 个人配置与数据（绝不提交！含 API Key 和个人文件记录）
 config.json
+config.json.*
+*.testbak
 cache.json
 cache.json.bak
 undo.json
@@ -18,3 +20,6 @@ __pycache__/
 
 # 构建日志
 rebuild*.log
+
+# 本机开发测试脚本（含本机路径，不上传）
+test_*.py

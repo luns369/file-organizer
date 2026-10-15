@@ -85,7 +85,17 @@ def legacy_key(path):
 
 
 # ---------------- AI 分析 ----------------
-def build_prompt(filename, text, existing_categories):
+def build_rules_block(rules):
+    """把用户自定义分类要求拼成提示词段落（第一档：自定义分类要求）。
+    后续档位的规则来源（场景预设细化、人工纠正示例、方案确认结果）
+    都通过这一段注入提示词，结构不变。"""
+    rules = (rules or "").strip()
+    if not rules:
+        return ""
+    return f"用户额外要求（优先级最高，分类时必须遵守；与默认规则冲突时以本要求为准）：\n{rules}\n\n"
+
+
+def build_prompt(filename, text, existing_categories, rules=""):
     cats = "、".join(sorted(existing_categories)) if existing_categories else "（暂无）"
     return f"""文件名：{filename}
 
@@ -94,7 +104,7 @@ def build_prompt(filename, text, existing_categories):
 
 已有分类：{cats}
 
-请完成三件事：
+{build_rules_block(rules)}请完成三件事：
 1. 提取 3 个关键词；
 2. 用一句话（30 字以内）总结这个文件的内容；
 3. 给出一个分类名：2-6 个字的简短中文词，从内容领域或使用场景命名（如"AI学习""工作文档""烹饪食谱""医疗""合同"）。已有分类里有合适的就直接复用，都不合适再新建。
@@ -114,7 +124,7 @@ def normalize_result(data):
     }
 
 
-def analyze(client, converter, path, model, existing_categories):
+def analyze(client, converter, path, model, existing_categories, rules=""):
     """提取文件文字并调用 DeepSeek 分析。任何一步失败都不会中断整体流程。"""
     try:
         text = (converter.convert(str(path)).text_content or "").strip()
@@ -128,7 +138,7 @@ def analyze(client, converter, path, model, existing_categories):
             model=model,
             messages=[
                 {"role": "system", "content": "你是专业的文件整理助手，擅长快速理解文档内容并归类。始终输出合法 JSON。"},
-                {"role": "user", "content": build_prompt(path.name, text[:MAX_TEXT_CHARS], existing_categories)},
+                {"role": "user", "content": build_prompt(path.name, text[:MAX_TEXT_CHARS], existing_categories, rules)},
             ],
             response_format={"type": "json_object"},
             temperature=0.3,
@@ -206,12 +216,13 @@ def write_excel(excel_path, rows):
 
 
 # ---------------- 全局分类 ----------------
-def fingerprint(keys):
-    """文件库指纹：文件有增删改时自动重新做一次全局分类。"""
-    return hashlib.md5("\n".join(sorted(keys)).encode("utf-8")).hexdigest()
+def fingerprint(keys, rules=""):
+    """文件库指纹：文件有增删改、或自定义分类要求变化时，自动重新做一次全局分类。"""
+    raw = "\n".join(sorted(keys)) + "\n@@rules@@\n" + (rules or "").strip()
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
-def classify_globally(client, model, infos):
+def classify_globally(client, model, infos, rules=""):
     """把全部文件的关键词+总结一次性发给 AI，通盘设计分类体系并逐文件分配。"""
     lines = [
         f"{i}. {r['name']} | 关键词：{'、'.join(r['keywords']) or '无'} | 总结：{r['summary']}"
@@ -221,8 +232,8 @@ def classify_globally(client, model, infos):
 
 {chr(10).join(lines)}
 
-请你通盘考虑整个文件库，完成两件事：
-1. 设计一套统一的分类体系：5-12 个分类，互斥、粒度适中；分类名为 2-8 个字的简短中文词，从内容领域或使用场景命名（如"AI学习""简历求职""考公资料""烹饪食谱"），要概括内容主题，不要照抄文件名或文件夹名；
+{build_rules_block(rules)}请你通盘考虑整个文件库，完成两件事：
+1. 设计一套统一的分类体系：5-12 个分类，互斥、粒度适中；分类名为 2-8 个字的简短中文词，从内容领域或使用场景命名（如"AI学习""简历求职""考公资料""烹饪食谱"），要概括内容主题，不要照抄文件名或文件夹名；若上方用户要求对分类维度、粒度、数量另有说明，以用户要求为准；
 2. 把每个文件归入最合适的一类。内容相似的文件必须归入同一个分类，分类名写法完全一致。实在无法归类的才用"未分类"。
 
 严格按以下 JSON 格式返回，键是文件编号（每个文件都要有）：
@@ -313,7 +324,7 @@ def main():
     need_ai = [fp for fp in files
                if keys[fp] not in cache or cache[keys[fp]].get("category") in FAIL_CATEGORIES]
 
-    fp_hash = fingerprint(list(keys.values()))
+    fp_hash = fingerprint(list(keys.values()), config.get("custom_rules", ""))
     global_entry = cache.get(GLOBAL_KEY, {})
     need_global = global_entry.get("fingerprint") != fp_hash
 
@@ -326,13 +337,14 @@ def main():
             converter = MarkItDown()
 
     model = config.get("model", "deepseek-chat")
+    rules = (config.get("custom_rules") or "").strip()  # 第一档：自定义分类要求
     existing_categories = {v.get("category", "") for v in cache.values()} - {""}
     for i, fp in enumerate(files, 1):
         if keys[fp] in cache and cache[keys[fp]].get("category") not in FAIL_CATEGORIES:
             print(f"[{i}/{len(files)}] 缓存命中：{fp.name}")
             continue
         print(f"[{i}/{len(files)}] AI 分析中：{fp.name}")
-        result = analyze(client, converter, fp, model, existing_categories)
+        result = analyze(client, converter, fp, model, existing_categories, rules)
         if result["category"] in FAIL_CATEGORIES:
             # 失败结果不落缓存：下次运行自动重试（失败条目不写盘）
             cache.pop(keys[fp], None)
@@ -347,8 +359,10 @@ def main():
     # 第二步：全局分类——把全部文件的关键词和总结发给 AI，通盘设计分类体系
     if need_global:
         print("\n正在根据整个文件库做全局分类...")
+        if rules:
+            print("已加载自定义分类要求")
         infos = [{"name": fp.name, **cache[keys[fp]]} for fp in files]
-        mapping = classify_globally(client, model, infos)
+        mapping = classify_globally(client, model, infos, rules)
         if mapping:
             cache[GLOBAL_KEY] = {"fingerprint": fp_hash, "mapping": mapping}
             save_cache(cache)

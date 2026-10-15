@@ -3,5 +3,6 @@
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-chat",
   "source_folder": "C:\\Users\\你的用户名\\Desktop\\要整理的文件夹",
-  "excel_name": "文件整理总表.xlsx"
+  "excel_name": "文件整理总表.xlsx",
+  "custom_rules": ""
 }

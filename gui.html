@@ -56,11 +56,13 @@
   .field { margin-bottom: 14px; }
   .field label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: #374151; }
   .field .hint { font-size: 12px; color: var(--muted); margin-top: 5px; line-height: 1.6; }
-  input[type=text], input[type=password] {
+  input[type=text], input[type=password], select, textarea {
     width: 100%; padding: 10px 12px; font-size: 14px; border: 1px solid var(--border);
     border-radius: 9px; outline: none; transition: border-color .15s, box-shadow .15s; background: #fff;
+    font-family: inherit; color: var(--text);
   }
-  input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(22,163,74,.12); }
+  textarea { resize: vertical; line-height: 1.7; min-height: 76px; }
+  input:focus, select:focus, textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(22,163,74,.12); }
 
   .row { display: flex; gap: 10px; }
   .row .grow { flex: 1; }
@@ -137,6 +139,24 @@
       <input type="password" id="apiKey" placeholder="留空表示不修改">
       <div class="hint">填一次保存在本机，不会上传到任何地方。获取地址：platform.deepseek.com</div>
     </div>
+    <div class="field">
+      <label for="scene">分类场景预设</label>
+      <select id="scene">
+        <option value="">不使用预设（自由分类）</option>
+        <option value="student">学生学习（按学科/课程分）</option>
+        <option value="work">工作办公（按项目/事务分）</option>
+        <option value="research">科研论文（按课题方向分）</option>
+        <option value="job">求职应聘（按求职环节分）</option>
+        <option value="finance">财务票据（按用途+时间分）</option>
+        <option value="life">生活杂项（按生活场景分）</option>
+      </select>
+      <div class="hint">选中场景会自动填写下方的分类要求，可继续修改；它决定 AI 按什么维度设计分类。</div>
+    </div>
+    <div class="field">
+      <label for="customRules">自定义分类要求</label>
+      <textarea id="customRules" rows="4" placeholder="用大白话写要求，例如：按大一到大四的课程分开；所有简历单独一类；重复文件归到一起；分类控制在 8 类以内"></textarea>
+      <div class="hint">AI 分类时优先遵守这里的要求。修改后下次「开始分析」会自动重新做全局分类（逐文件结果仍走缓存，不重复消耗额度）。</div>
+    </div>
     <div style="text-align:right">
       <button class="btn primary small" id="btnSave" type="button">保存设置</button>
     </div>
@@ -190,6 +210,24 @@ let logOffset = 0;
 let pollTimer = null;
 
 const $ = id => document.getElementById(id);
+
+// 第二档：场景预设。选中场景 = 自动把预设文案填入「自定义分类要求」，可再编辑。
+// 预设只是预填文本，真正生效的是文本框内容（config.json 的 custom_rules）。
+const SCENE_PRESETS = {
+  student: "按学科/课程分类：同一门课的作业、笔记、课件、复习资料归到同一类；分类名用课程名或学习主题命名；粒度中等（8~12 类）；不要按文件格式分类（例如不要把所有 PDF 归为一类）。",
+  work: "按工作场景或项目分类（如「会议材料」「项目文档」「行政事务」「对外沟通」）；同一项目的所有文件必须归到同一类；分类名简洁正式；粒度中等（6~10 类）。",
+  research: "按研究主题/课题方向分类：同一课题的论文、实验数据、分析报告、综述归到同一类；粒度可以细一些（10~20 类）；分类名要体现研究方向。",
+  job: "按求职环节分类（如「简历投递」「笔试题库」「面试准备」「公司信息」「offer与签约」）；同一目标公司/岗位的材料归到一起；粒度较粗（5~8 类）。",
+  finance: "按用途+时间分类（如「2025报销」「日常账单」「合同协议」「证件证书」）；票据、凭证、合同务必分开；粒度中等（6~10 类）。",
+  life: "按生活场景分类（如「健康医疗」「出行旅游」「购物消费」「兴趣爱好」）；粒度较粗（4~8 类）；实在无法归类的放「未分类」。"
+};
+$("scene").onchange = () => {
+  const v = $("scene").value;
+  if (v && SCENE_PRESETS[v]) {
+    $("customRules").value = SCENE_PRESETS[v];
+    toast("已填入「" + $("scene").selectedOptions[0].text + "」的分类要求，可继续修改");
+  }
+};
 const toast = (msg) => {
   const t = $("toast");
   t.textContent = msg;
@@ -211,6 +249,7 @@ async function loadConfig() {
     $("folder").value = d.source_folder || "";
     $("apiKey").value = d.api_key || "";
     $("apiKey").placeholder = d.api_key ? "已设置：" + d.api_key + "（留空不修改）" : "留空表示不修改";
+    $("customRules").value = d.custom_rules || "";
     updateBadge(d.running);
     if (d.running) { currentTask = d.running; startPolling(); }
   } catch (e) { toast("无法连接本服务，请确认 app.py 正在运行"); }
@@ -223,7 +262,10 @@ function updateBadge(running) {
 }
 
 $("btnSave").onclick = async () => {
-  const body = { source_folder: $("folder").value.trim() };
+  const body = {
+    source_folder: $("folder").value.trim(),
+    custom_rules: $("customRules").value.trim()   // 允许清空，总是提交
+  };
   const key = $("apiKey").value.trim();
   if (key) body.api_key = key;
   const d = await (await fetch("/api/config", {

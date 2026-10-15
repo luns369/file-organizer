@@ -69,6 +69,9 @@ def save_config(data):
     for k in ("source_folder", "api_key", "base_url", "model", "excel_name"):
         if data.get(k) not in (None, ""):
             cfg[k] = str(data[k]).strip()
+    # custom_rules（自定义分类要求）允许清空：只要提交了该字段就覆盖
+    if "custom_rules" in data:
+        cfg["custom_rules"] = str(data["custom_rules"]).strip()
     CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     return cfg
 
@@ -168,6 +171,7 @@ class Handler(BaseHTTPRequestHandler):
                 "base_url": cfg.get("base_url", "https://api.deepseek.com"),
                 "model": cfg.get("model", "deepseek-chat"),
                 "excel_name": cfg.get("excel_name", "文件整理总表.xlsx"),
+                "custom_rules": cfg.get("custom_rules", ""),
                 "running": _state["running"],
             }, ensure_ascii=False))
         elif self.path.startswith("/api/log/"):
