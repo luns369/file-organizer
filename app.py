@@ -19,6 +19,7 @@ import os
 import socket
 import sys
 import threading
+import time
 import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +31,7 @@ if getattr(sys, "frozen", False):
 else:
     DATA_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = DATA_DIR / "config.json"
+SCHEME_FILE = DATA_DIR / "scheme.json"  # 第三档：分类方案（可人工修改确认）
 LOG_DIR = DATA_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 # 打包成 exe 后，gui.html 被打进 exe 内部（_MEIPASS），从那里读取
@@ -39,7 +41,7 @@ else:
     GUI_FILE = DATA_DIR / "gui.html"
 
 # 可执行的任务名
-TASKS = {"analyze", "organize", "undo"}
+TASKS = {"analyze", "apply", "organize", "undo"}
 
 # 全局运行状态
 _lock = threading.Lock()
@@ -76,6 +78,45 @@ def save_config(data):
     return cfg
 
 
+def list_source_files():
+    """列出待整理文件夹里的文件名（不读内容，仅用于界面显示"未分配文件"）。"""
+    cfg = load_config()
+    folder = Path(cfg.get("source_folder", ""))
+    if not folder.is_dir():
+        return []
+    exts = {".doc", ".docx", ".pdf", ".ppt", ".pptx", ".txt"}  # 与 main.py 的 SUPPORTED_EXTS 保持一致
+    return [p.name for p in sorted(folder.rglob("*"))
+            if p.is_file() and p.suffix.lower() in exts and not p.name.startswith("~$")]
+
+
+def load_scheme():
+    if SCHEME_FILE.exists():
+        try:
+            return json.loads(SCHEME_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def save_scheme(data):
+    """保存（可能被人工改过的）分类方案，保留原有的指纹与规则信息。"""
+    scheme = load_scheme() or {}
+    cats = []
+    for c in (data.get("categories") or []):
+        name = str(c.get("name", "")).strip()
+        if not name:
+            continue
+        cats.append({
+            "name": name,
+            "desc": str(c.get("desc", "")).strip(),
+            "files": [str(f) for f in (c.get("files") or [])],
+        })
+    scheme["categories"] = cats
+    scheme["edited_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    SCHEME_FILE.write_text(json.dumps(scheme, ensure_ascii=False, indent=2), encoding="utf-8")
+    return scheme
+
+
 def start_task(name):
     """后台启动一个任务。返回 (是否成功, 提示语)。"""
     if name not in TASKS:
@@ -100,7 +141,10 @@ def _run_task(name):
             try:
                 if name == "analyze":
                     import main as _m
-                    _m.main()
+                    _m.do_analyze()
+                elif name == "apply":
+                    import main as _m
+                    _m.do_apply()
                 elif name == "organize":
                     import organize as _o
                     _o.do_organize()
@@ -184,6 +228,18 @@ class Handler(BaseHTTPRequestHandler):
             }, ensure_ascii=False))
         elif self.path == "/api/status":
             self._send(200, json.dumps({"running": _state["running"]}))
+        elif self.path == "/api/scheme":
+            scheme = load_scheme()
+            self._send(200, json.dumps({
+                "ok": True,
+                "exists": bool(scheme.get("categories")),
+                "fingerprint": scheme.get("fingerprint", ""),
+                "rules": scheme.get("rules", ""),
+                "created_at": scheme.get("created_at", ""),
+                "edited_at": scheme.get("edited_at", ""),
+                "categories": scheme.get("categories") or [],
+                "all_files": list_source_files(),
+            }, ensure_ascii=False))
         elif self.path == "/api/open_excel":
             cfg = load_config()
             folder = Path(cfg.get("source_folder", ""))
@@ -214,6 +270,13 @@ class Handler(BaseHTTPRequestHandler):
                 "source_folder": cfg.get("source_folder", ""),
                 "api_key": mask_key(cfg.get("api_key", "")),
             }, ensure_ascii=False))
+        elif self.path == "/api/scheme":
+            length = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(length) or b"{}")
+            scheme = save_scheme(data)
+            n = len(scheme.get("categories") or [])
+            self._send(200, json.dumps({"ok": True, "msg": f"分类方案已保存（{n} 个分类）"},
+                                       ensure_ascii=False))
         elif self.path.startswith("/api/run/"):
             name = self.path.split("/")[-1]
             ok, msg = start_task(name)

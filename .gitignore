@@ -4,6 +4,8 @@ config.json.*
 *.testbak
 cache.json
 cache.json.bak
+scheme.json
+scheme.json.bak_test
 undo.json
 logs/
 

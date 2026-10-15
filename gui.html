@@ -113,6 +113,30 @@
     pointer-events: none; max-width: 90vw;
   }
   .toast.show { opacity: 1; }
+
+  /* 分类方案（第三档） */
+  .scheme-meta { font-size: 12.5px; color: var(--muted); margin-bottom: 12px; line-height: 1.7; }
+  .cat {
+    border: 1px solid var(--border); border-radius: 12px; padding: 13px 14px;
+    margin-bottom: 12px; background: #fbfcfd;
+  }
+  .cat-head { display: flex; gap: 8px; align-items: center; margin-bottom: 9px; flex-wrap: wrap; }
+  .cat-head input.cat-name {
+    flex: 1 1 150px; font-weight: 600; padding: 8px 11px; font-size: 14px;
+  }
+  .cat-head input.cat-desc { flex: 2 1 220px; padding: 8px 11px; font-size: 13px; }
+  .cat-head select, .file-row select { width: auto; font-size: 12.5px; padding: 7px 9px; }
+  .cat-files { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+  .file-row {
+    display: flex; align-items: center; gap: 8px; font-size: 13px; background: #fff;
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+  }
+  .file-row .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cat-count { font-size: 12px; color: var(--muted); margin-top: 7px; }
+  .scheme-empty { font-size: 13px; color: var(--muted); line-height: 1.9; }
+  .scheme-toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+  .unassigned { border: 1px dashed #f0b9b9; border-radius: 12px; padding: 12px 14px; background: #fff8f8; }
+  .unassigned h3 { font-size: 13px; font-weight: 600; color: #b91c1c; margin-bottom: 8px; }
 </style>
 </head>
 <body>
@@ -168,7 +192,12 @@
       <button class="btn primary" id="btnAnalyze" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M12 3v9l5 3"/></svg>
         开始分析
-        <span style="font-weight:400;font-size:12px;color:#d1fae5">扫描 + AI 分类 → 生成总表</span>
+        <span style="font-weight:400;font-size:12px;color:#d1fae5">扫描 + AI 分析 → 出分类方案</span>
+      </button>
+      <button class="btn primary" id="btnApply" type="button" style="background:#0ea5e9;box-shadow:0 2px 8px rgba(14,165,233,.28)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+        按方案生成总表
+        <span style="font-weight:400;font-size:12px;color:#e0f2fe">确认方案后归位</span>
       </button>
       <button class="btn primary" id="btnOrganize" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18"/><path d="M3 12h18"/><path d="M3 17h18"/></svg>
@@ -193,12 +222,23 @@
   </section>
 
   <section class="card">
-    <h2><span class="step">3</span>运行日志</h2>
+    <h2><span class="step">3</span>分类方案（确认后再生成总表）</h2>
+    <div class="scheme-meta" id="schemeMeta">还没有分类方案。先点「开始分析」，AI 会给出分类方案供你确认。</div>
+    <div id="schemeList"></div>
+    <div class="scheme-toolbar">
+      <button class="btn ghost small" id="btnAddCat" type="button">＋ 添加分类</button>
+      <button class="btn ghost small" id="btnSaveScheme" type="button">保存方案</button>
+      <button class="btn ghost small" id="btnReloadScheme" type="button">放弃修改并刷新</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step">4</span>运行日志</h2>
     <div class="logbox" id="logbox">等待开始……</div>
   </section>
 
   <footer>
-    建议流程：设置文件夹和密钥 → 开始分析 → 打开总表检查/修改分类 → 开始归档 → 不满意可撤销。
+    建议流程：设置文件夹和密钥 → 开始分析 → 在「分类方案」里确认/修改 → 按方案生成总表 → 打开总表检查 → 开始归档 → 不满意可撤销。
     <br>
     <button id="btnShutdown" type="button">关闭本服务</button>
   </footer>
@@ -237,10 +277,8 @@ const toast = (msg) => {
 };
 
 function setBusy(busy) {
-  $("btnAnalyze").disabled = busy;
-  $("btnOrganize").disabled = busy;
-  $("btnUndo").disabled = busy;
-  $("btnSave").disabled = busy;
+  ["btnAnalyze", "btnApply", "btnOrganize", "btnUndo", "btnSave", "btnAddCat", "btnSaveScheme", "btnReloadScheme"]
+    .forEach(id => { const el = $(id); if (el) el.disabled = busy; });
 }
 
 async function loadConfig() {
@@ -307,11 +345,16 @@ function poll() {
         pollTimer = null;
         setBusy(false);
         updateBadge(null);
+        const finished = currentTask;
         currentTask = null;
         const ok = d.exit_code === 0;
         $("statusText").innerHTML = ok
           ? '<span style="color:#16a34a;font-weight:600">任务完成</span>'
           : '<span style="color:#dc2626;font-weight:600">任务出错，请查看上方日志</span>';
+        if (ok && finished === "analyze") {
+          loadScheme();   // 分析完自动刷新分类方案
+          toast("分类方案已生成，请在下方确认");
+        }
       }
     })
     .catch(() => { clearInterval(pollTimer); setBusy(false); toast("连接中断"); });
@@ -334,7 +377,180 @@ $("btnShutdown").onclick = async () => {
   setTimeout(() => setBusy(true), 200);
 };
 
+/* ================= 第三档：分类方案（确认后再生成总表） ================= */
+let SCHEME = [];      // [{name, desc, files:[文件名]}]
+let ALL_FILES = [];   // 文件夹里所有可整理文件
+
+const escapeHtml = s => String(s).replace(/[&<>"']/g,
+  ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+
+function unassignedFiles() {
+  const used = new Set();
+  SCHEME.forEach(c => (c.files || []).forEach(f => used.add(f)));
+  return ALL_FILES.filter(f => !used.has(f));
+}
+
+async function loadScheme() {
+  try {
+    const d = await (await fetch("/api/scheme")).json();
+    ALL_FILES = d.all_files || [];
+    SCHEME = (d.categories || []).map(c => ({
+      name: c.name, desc: c.desc || "", files: (c.files || []).slice()
+    }));
+    if (d.exists) {
+      let meta = "方案生成时间：" + (d.created_at || "未知");
+      if (d.edited_at) meta += "　最近修改：" + d.edited_at;
+      if (d.rules) meta += "<br>生成时使用的分类要求：" + escapeHtml(d.rules);
+      meta += "<br>改名 / 增删 / 合并 / 移动文件后，点「按方案生成总表」即可按这份方案归位。";
+      $("schemeMeta").innerHTML = meta;
+    } else {
+      $("schemeMeta").textContent = "还没有分类方案。先点「开始分析」，AI 会给出分类方案供你确认。";
+    }
+    renderScheme();
+  } catch (e) { toast("读取分类方案失败"); }
+}
+
+function renderScheme() {
+  const box = $("schemeList");
+  box.innerHTML = "";
+  if (!SCHEME.length) {
+    box.innerHTML = '<div class="scheme-empty">暂无方案内容。可点「＋ 添加分类」手动建一个，或先「开始分析」让 AI 生成。</div>';
+    return;
+  }
+  SCHEME.forEach((cat, ci) => box.appendChild(catBlock(cat, ci)));
+  const un = unassignedFiles();
+  if (un.length) {
+    const wrap = document.createElement("div");
+    wrap.className = "unassigned";
+    const h = document.createElement("h3");
+    h.textContent = "未分配文件（" + un.length + " 个）：用右侧下拉框把它们归到某个分类";
+    wrap.appendChild(h);
+    un.forEach(fn => wrap.appendChild(fileRow(fn, -1)));
+    box.appendChild(wrap);
+  }
+}
+
+function catBlock(cat, ci) {
+  const div = document.createElement("div");
+  div.className = "cat";
+
+  const head = document.createElement("div");
+  head.className = "cat-head";
+
+  const name = document.createElement("input");
+  name.type = "text"; name.className = "cat-name"; name.value = cat.name;
+  name.placeholder = "分类名";
+  name.oninput = () => { SCHEME[ci].name = name.value; };
+  head.appendChild(name);
+
+  const desc = document.createElement("input");
+  desc.type = "text"; desc.className = "cat-desc"; desc.value = cat.desc || "";
+  desc.placeholder = "定义边界：这一类装什么";
+  desc.oninput = () => { SCHEME[ci].desc = desc.value; };
+  head.appendChild(desc);
+
+  if (SCHEME.length > 1) {
+    const merge = document.createElement("select");
+    merge.innerHTML = '<option value="">合并到…</option>';
+    SCHEME.forEach((c, j) => {
+      if (j === ci) return;
+      const o = document.createElement("option");
+      o.value = j; o.textContent = c.name || "（未命名）";
+      merge.appendChild(o);
+    });
+    merge.onchange = () => {
+      if (merge.value === "") return;
+      mergeCategory(ci, parseInt(merge.value, 10));
+    };
+    head.appendChild(merge);
+  }
+
+  const del = document.createElement("button");
+  del.type = "button"; del.className = "btn warn small"; del.textContent = "删除";
+  del.onclick = () => { SCHEME.splice(ci, 1); renderScheme(); };
+  head.appendChild(del);
+  div.appendChild(head);
+
+  const files = document.createElement("div");
+  files.className = "cat-files";
+  (cat.files || []).forEach(fn => files.appendChild(fileRow(fn, ci)));
+  div.appendChild(files);
+
+  const count = document.createElement("div");
+  count.className = "cat-count";
+  count.textContent = "共 " + (cat.files || []).length + " 个文件";
+  div.appendChild(count);
+  return div;
+}
+
+function fileRow(fn, ci) {
+  const row = document.createElement("div");
+  row.className = "file-row";
+
+  const span = document.createElement("span");
+  span.className = "fname"; span.textContent = fn; span.title = fn;
+  row.appendChild(span);
+
+  const sel = document.createElement("select");
+  sel.innerHTML = '<option value="">移到…</option>';
+  SCHEME.forEach((c, j) => {
+    if (j === ci) return;
+    const o = document.createElement("option");
+    o.value = j; o.textContent = c.name || "（未命名）";
+    sel.appendChild(o);
+  });
+  sel.onchange = () => {
+    if (sel.value === "") return;
+    moveFile(fn, ci, parseInt(sel.value, 10));
+  };
+  row.appendChild(sel);
+  return row;
+}
+
+function moveFile(fn, fromCi, toCi) {
+  if (fromCi >= 0) SCHEME[fromCi].files = SCHEME[fromCi].files.filter(f => f !== fn);
+  const target = SCHEME[toCi];
+  if (target && !target.files.includes(fn)) target.files.push(fn);
+  renderScheme();
+}
+
+function mergeCategory(ci, targetCi) {
+  const src = SCHEME[ci];
+  const targetName = SCHEME[targetCi].name;
+  (src.files || []).forEach(fn => {
+    if (!SCHEME[targetCi].files.includes(fn)) SCHEME[targetCi].files.push(fn);
+  });
+  SCHEME.splice(ci, 1);
+  toast("已把「" + src.name + "」合并进「" + targetName + "」");
+  renderScheme();
+}
+
+function addCategory() {
+  SCHEME.push({ name: "新分类", desc: "", files: [] });
+  renderScheme();
+}
+
+async function saveScheme(silent) {
+  const d = await (await fetch("/api/scheme", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ categories: SCHEME })
+  })).json();
+  if (!silent) toast(d.msg || "方案已保存");
+  return d.ok;
+}
+
+$("btnAddCat").onclick = addCategory;
+$("btnSaveScheme").onclick = () => saveScheme(false);
+$("btnReloadScheme").onclick = () => loadScheme();
+$("btnApply").onclick = async () => {
+  if (!SCHEME.length) { toast("还没有分类方案，请先「开始分析」"); return; }
+  await saveScheme(true);       // 先把界面上的修改存盘，再按这份方案归位
+  startTask("apply");
+};
+
 loadConfig();
+loadScheme();
 </script>
 </body>
 </html>
