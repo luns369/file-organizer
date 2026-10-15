@@ -391,9 +391,10 @@ function poll() {
           : '<span style="color:#dc2626;font-weight:600">任务出错，请查看上方日志</span>';
         if (ok && finished === "analyze") {
           $("schemeCard").classList.remove("collapsed");   // 分析完自动展开，方便确认新方案
+          FOLD_NEW = true;                                 // 新方案默认把所有分类收起
           persistFoldUI();
           loadScheme();   // 分析完自动刷新分类方案
-          toast("分类方案已生成，请在下方确认");
+          toast("分类方案已生成：分类已收起，点左侧小三角展开查看");
         }
       }
     })
@@ -425,6 +426,7 @@ let ALL_FILES = [];   // 文件夹里所有可整理文件
 const LS_CARD = "fo_scheme_collapsed";
 const LS_CATS = "fo_cat_collapsed";
 let COLLAPSED = new Set();   // 已收起的分类 uid
+let FOLD_NEW = false;        // true = 刚生成的新方案，加载后把所有分类默认收起
 let UID_SEQ = 0;
 const newUid = () => "c" + (++UID_SEQ);   // uid 只在前端用，不提交给后端
 
@@ -473,6 +475,12 @@ async function loadScheme() {
     SCHEME = (d.categories || []).map(c => ({
       uid: newUid(), name: c.name, desc: c.desc || "", files: (c.files || []).slice()
     }));
+    if (FOLD_NEW) {
+      // 刚分析出来的新方案：全部分类默认收起，让用户先看分类总览，想看细节再点小三角
+      FOLD_NEW = false;
+      COLLAPSED = new Set(SCHEME.map(c => c.uid));
+      persistFoldUI();
+    }
     if (d.exists) {
       let meta = "方案生成时间：" + (d.created_at || "未知");
       if (d.edited_at) meta += "　最近修改：" + d.edited_at;
