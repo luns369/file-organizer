@@ -485,6 +485,14 @@ async function loadScheme() {
       let meta = "方案生成时间：" + (d.created_at || "未知");
       if (d.edited_at) meta += "　最近修改：" + d.edited_at;
       if (d.rules) meta += "<br>生成时使用的分类要求：" + escapeHtml(d.rules);
+      const learned = d.learned || [];
+      if (learned.length) {
+        const shown = learned.slice(0, 3)
+          .map(x => escapeHtml(x.file) + " → " + escapeHtml(x.category)).join("　");
+        meta += '<br><span style="color:#15803d;font-weight:600">已学习你手动调整过的 '
+              + learned.length + ' 条归类偏好</span>：' + shown
+              + (learned.length > 3 ? "　等" : "");
+      }
       meta += "<br>改名 / 增删 / 合并 / 移动文件后，点「按方案生成总表」即可按这份方案归位。";
       $("schemeMeta").innerHTML = meta;
     } else {

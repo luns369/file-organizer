@@ -238,6 +238,8 @@ class Handler(BaseHTTPRequestHandler):
                 "created_at": scheme.get("created_at", ""),
                 "edited_at": scheme.get("edited_at", ""),
                 "categories": scheme.get("categories") or [],
+                # 第四档：本次生成方案时参考了多少条「用户手动改过的归类」
+                "learned": scheme.get("learned") or [],
                 "all_files": list_source_files(),
             }, ensure_ascii=False))
         elif self.path == "/api/open_excel":

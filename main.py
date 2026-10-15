@@ -6,7 +6,7 @@ AI 文件整理工具 —— 分析文件并生成 Excel 总表
     python main.py          第一步：扫描 + 逐文件分析 + 生成分类方案（等待确认）
     python main.py apply    第二步：按确认后的分类方案归位，生成 Excel 总表
 
-流程（第三档：方案先确认，再执行）：
+流程（第三档：方案先确认，再执行；第四档：学习人工修改）：
     扫描文件夹 → 提取文字内容 → DeepSeek 逐文件分析（关键词/总结）
     → DeepSeek 只给出「分类方案」（分类名 + 定义边界 + 预计包含哪些文件）
     → 在网页界面上确认/修改方案（改名、增删、合并、调整文件归属）
@@ -16,7 +16,8 @@ AI 文件整理工具 —— 分析文件并生成 Excel 总表
   - 已分析过的文件会写入 cache.json，重复运行不再消耗 API 费用
   - 分类方案写入 scheme.json，可反复修改确认；文件库或分类要求变化时会提示重新生成
   - 总表为矩阵布局：每个分类一列，每个文件一个格子，点击格子直接打开文件
-  - 重跑时保留你在总表里手动改过的分类（按文件链接或 文件名+总结 匹配）
+  - 你在总表里手动改过的分类会被记为「归类偏好」（cache.json 的 baseline 对比得出），
+    下一轮注入提示词，AI 越用越准；这些文件归位时也永远保留你的分类
 """
 
 import hashlib
@@ -51,6 +52,7 @@ MAX_TEXT_CHARS = 4000  # 发给 AI 的内容上限，控制 token 消耗
 # 失败类结果不进缓存（或视为需要重试）：否则 API Key 失效一次，
 # 失败结果会被永久缓存，之后每次运行都"缓存命中"直接跳过，永远无法恢复
 FAIL_CATEGORIES = {"分析失败", "解析失败", "无法识别"}
+MAX_EXAMPLES = 20  # 最多给 AI 看多少条「人工纠正」示例，控制 token 消耗
 
 
 # ---------------- 配置与缓存 ----------------
@@ -100,6 +102,19 @@ def build_rules_block(rules):
     if not rules:
         return ""
     return f"用户额外要求（优先级最高，分类时必须遵守；与默认规则冲突时以本要求为准）：\n{rules}\n\n"
+
+
+def build_examples_block(examples):
+    """第四档：把用户「手动改过的归类」拼成偏好示例段落，注入提示词，越用越准。
+    examples: [(文件名, 总结, 用户选择的分类, AI 原本建议的分类)]"""
+    examples = list(examples or [])[:MAX_EXAMPLES]
+    if not examples:
+        return ""
+    lines = "\n".join(f"- 「{name}」→ {cat}" for name, _sum, cat, _old in examples)
+    return (f"用户以往整理时手动调整过的归类（{len(examples)} 条，这是用户的真实偏好，优先级仅次于上面的额外要求）：\n"
+            f"{lines}\n"
+            f"请优先沿用这些分类名和归类习惯：涉及同类内容时，分类名与上述写法保持一致；"
+            f"若这些分类明显不适用于当前文件库，可以调整，但要保持相近的归类倾向。\n\n")
 
 
 def build_prompt(filename, text, existing_categories, rules=""):
@@ -223,10 +238,85 @@ def write_excel(excel_path, rows):
 
 
 # ---------------- 分类方案：先出方案，确认后归位（第三档） ----------------
-def fingerprint(keys, rules=""):
-    """文件库指纹：文件有增删改、或自定义分类要求变化时，自动重新做一次全局分类。"""
-    raw = "\n".join(sorted(keys)) + "\n@@rules@@\n" + (rules or "").strip()
+def fingerprint(keys, rules="", examples_str=""):
+    """文件库指纹：文件有增删改、自定义要求或人工偏好变化时，自动重新做一次全局分类。"""
+    raw = ("\n".join(sorted(keys))
+           + "\n@@rules@@\n" + (rules or "").strip()
+           + "\n@@examples@@\n" + (examples_str or "").strip())
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def file_key(name, summary):
+    """人工偏好的稳定标识：文件名 + 一句话总结。
+    不用路径，因为归档后文件会被移到子文件夹里，路径会变；总结来自缓存，归档不影响。"""
+    return f"{name}\x1f{summary}"
+
+
+def examples_str(examples):
+    """把示例列表压成一个字符串，专用于指纹计算（排序固定，避免无谓的重做）。"""
+    return "\n".join(f"{name}\x1f{cat}"
+                     for name, _sum, cat, _old in sorted(examples or [], key=lambda x: x[0]))
+
+
+def get_baseline():
+    """上一轮 AI 归位的分类基线：{文件名|总结: AI 给的分类}。
+    用户现在的总表分类与它不一致，就说明那一格是人工改的。"""
+    return (load_cache().get(GLOBAL_KEY) or {}).get("baseline") or {}
+
+
+def collect_corrections(excel_path, files, cache, keys):
+    """第四档：找出用户在总表里手动改过的分类。
+    返回 (示例列表 [(文件名, 总结, 用户分类, AI原建议)], 是否已有基线)。
+    没有基线时无法判断改动，示例为空。"""
+    by_path, by_namesum = load_manual_categories(excel_path)
+    if not by_path and not by_namesum:
+        return [], False
+    baseline = get_baseline()
+    if not baseline:
+        return [], False  # 第一次运行本版本：先把当前总表当作基线，之后才谈得上"改动"
+    out = []
+    for fp in files:
+        info = cache.get(keys[fp]) or {}
+        summary = info.get("summary") or ""
+        current = by_path.get(norm_path(fp)) or by_namesum.get((fp.name, summary))
+        if not current:
+            continue
+        old = baseline.get(file_key(fp.name, summary))
+        if old and old != current:
+            out.append((fp.name, summary, current, old))
+    # 手工改过的文件多的库，只取前 MAX_EXAMPLES 条，够 AI 看出偏好
+    return sorted(out, key=lambda x: x[0])[:MAX_EXAMPLES], True
+
+
+def init_baseline_from_excel(cache, files, file_keys, excel_path):
+    """首次启用学习功能时，把现有总表里的分类记成基线（视为既成事实），
+    此后你再调整总表，改动就会被识别为"人工纠正"并学习。"""
+    by_path, by_namesum = load_manual_categories(excel_path)
+    baseline = {}
+    for fp in files:
+        info = cache.get(file_keys[fp]) or {}
+        summary = info.get("summary") or ""
+        cat = by_path.get(norm_path(fp)) or by_namesum.get((fp.name, summary))
+        if cat:
+            baseline[file_key(fp.name, summary)] = cat
+    if not baseline:
+        return 0
+    cache[GLOBAL_KEY] = dict(cache.get(GLOBAL_KEY) or {}, baseline=baseline)
+    save_cache(cache)
+    return len(baseline)
+
+
+def set_baseline(cache, files, file_keys, mapping):
+    """记录本轮 AI 归位的结果，作为下一次比对"人工改动"的基线。"""
+    baseline = {}
+    for i, fp in enumerate(files, 1):
+        info = cache.get(file_keys[fp]) or {}
+        cat = (mapping.get(str(i))
+               or info.get("category")
+               or "未分类")
+        baseline[file_key(fp.name, info.get("summary") or "")] = cat
+    cache[GLOBAL_KEY] = dict(cache.get(GLOBAL_KEY) or {}, baseline=baseline)
+    return baseline
 
 
 def clean_categories(raw_categories, infos):
@@ -274,14 +364,14 @@ def _file_lines(infos):
     )
 
 
-def propose_scheme(client, model, infos, rules=""):
+def propose_scheme(client, model, infos, rules="", examples=None):
     """第一步：只让 AI 给出分类方案（分类名 + 定义边界 + 预计包含哪些文件）。
     返回 [{name, desc, files:[文件名]}]；失败返回 []，由调用方兜底。"""
     prompt = f"""这是一个文件夹里全部 {len(infos)} 个文件的信息：
 
 {_file_lines(infos)}
 
-{build_rules_block(rules)}请先只设计一套分类方案，不要急着下最终结论。要求：
+{build_rules_block(rules)}{build_examples_block(examples)}请先只设计一套分类方案，不要急着下最终结论。要求：
 1. 设计 5-12 个分类（若上方用户要求对数量、粒度、分类维度另有说明，以用户要求为准），互斥、粒度适中；
 2. 分类名为 2-8 个字的简短中文词，从内容领域或使用场景命名，概括内容主题，不要照抄文件名或文件夹名；
 3. 每个分类给出"定义边界"：一句话说明这一类装什么、与相邻分类怎么区分，30 字以内；
@@ -301,7 +391,7 @@ def propose_scheme(client, model, infos, rules=""):
         return []
 
 
-def assign_by_scheme(client, model, infos, categories, rules=""):
+def assign_by_scheme(client, model, infos, categories, rules="", examples=None):
     """第二步：按用户确认后的分类方案，把每个文件归位。
     返回 {文件编号: 分类名}；方案外的名字一律落到"未分类"。"""
     cat_lines = "\n".join(
@@ -314,7 +404,7 @@ def assign_by_scheme(client, model, infos, categories, rules=""):
 用户已确认的分类方案（必须严格使用下列分类名，不得新增、改名或合并）：
 {cat_lines}
 
-{build_rules_block(rules)}请把每个文件归入上面方案中最合适的一类。内容相似的文件必须归入同一个分类；方案里确实没有合适归属的，才用"未分类"。
+{build_rules_block(rules)}{build_examples_block(examples)}请把每个文件归入上面方案中最合适的一类。内容相似的文件必须归入同一个分类；方案里确实没有合适归属的，才用"未分类"。
 
 严格按以下 JSON 格式返回，键是文件编号（每个文件都要有）：
 {{"assignments": {{"1": "分类名", "2": "分类名"}}}}"""
@@ -486,19 +576,28 @@ def build_infos(files, cache, keys):
     return infos
 
 
-def write_final_excel(config, folder, files, cache, keys, mapping):
-    """按 mapping 生成总表（人工改过的分类优先）。返回 (excel路径, 人工分类个数)。"""
+def write_final_excel(config, folder, files, cache, keys, mapping, keep_manual=None):
+    """按 mapping 生成总表。
+    keep_manual=None：保守模式，总表里读到的分类全部保留（无基线时的兼容行为）；
+    keep_manual=集合：只有集合里的文件（= 用户在总表里手动改过的那几个）保留其分类，
+    其余一律按确认后的方案归位——这样"人工修改"和"方案归位"不会互相打架。
+    返回 (excel 路径, 保留人工分类的个数)。"""
     excel_path = folder / config.get("excel_name", "文件整理总表.xlsx")
     manual_path, manual_namesum = load_manual_categories(excel_path)
 
     rows, n_manual = [], 0
     for i, fp in enumerate(files, 1):
         info = cache.get(keys[fp]) or {}
-        is_manual = norm_path(fp) in manual_path or (fp.name, info.get("summary", "")) in manual_namesum
-        if is_manual:
+        summary = info.get("summary", "")
+        manual_cat = (manual_path.get(norm_path(fp))
+                      or manual_namesum.get((fp.name, summary)))
+        if keep_manual is None:
+            keep = manual_cat is not None
+        else:
+            keep = manual_cat is not None and file_key(fp.name, summary) in keep_manual
+        if keep:
             n_manual += 1
-        category = (manual_path.get(norm_path(fp))
-                    or manual_namesum.get((fp.name, info.get("summary", "")))
+        category = ((manual_cat if keep else None)
                     or mapping.get(str(i))
                     or info.get("category")
                     or "未分类")
@@ -506,7 +605,7 @@ def write_final_excel(config, folder, files, cache, keys, mapping):
             "category": category,
             "name": fp.name,
             "keywords": info.get("keywords") or [],
-            "summary": info.get("summary") or "",
+            "summary": summary,
             "mtime_str": time.strftime("%Y-%m-%d %H:%M", time.localtime(fp.stat().st_mtime)),
             "path": fp,
         })
@@ -526,7 +625,23 @@ def do_analyze():
 
     cache, keys = prepare_cache(files)
     rules = (config.get("custom_rules") or "").strip()
-    fp_hash = fingerprint(list(keys.values()), rules)
+    excel_path = folder / config.get("excel_name", "文件整理总表.xlsx")
+
+    # 第四档：先看你上次在总表里手动改过什么，作为分类偏好喂给 AI
+    corrections, has_baseline = collect_corrections(excel_path, files, cache, keys)
+    if corrections:
+        print(f"已学习你手动调整过的 {len(corrections)} 条归类偏好：")
+        for name, _sum, cat, old in corrections[:5]:
+            print(f"  - {name} → {cat}（AI 原建议：{old}）")
+        if len(corrections) > 5:
+            print(f"  …… 共 {len(corrections)} 条")
+        print()
+    elif excel_path.exists() and not has_baseline:
+        n = init_baseline_from_excel(cache, files, keys, excel_path)
+        if n:
+            print(f"已把现有总表里的 {n} 个分类记录为基线，你之后再改动总表就会被学习到。\n")
+
+    fp_hash = fingerprint(list(keys.values()), rules, examples_str(corrections))
     todo = pending_files(files, cache, keys)
 
     scheme = load_scheme()
@@ -541,14 +656,16 @@ def do_analyze():
         print()
 
     if scheme_fresh:
-        print("分类方案已是最新（文件库与分类要求都没变化），直接复用。")
+        print("分类方案已是最新（文件库、分类要求与分类偏好都没变化），直接复用。")
         print_scheme(scheme["categories"])
     else:
         print("正在根据整个文件库设计分类方案……")
         if rules:
             print("已加载自定义分类要求")
+        if corrections:
+            print(f"已带入 {len(corrections)} 条你的历史归类偏好")
         model = config.get("model", "deepseek-chat")
-        cats = propose_scheme(client, model, build_infos(files, cache, keys), rules)
+        cats = propose_scheme(client, model, build_infos(files, cache, keys), rules, corrections)
         if not cats:
             print("已改用每个文件各自的建议分类，拼出一个初始方案，请手工调整。")
             cats = fallback_scheme(files, cache, keys)
@@ -557,6 +674,8 @@ def do_analyze():
             "rules": rules,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "categories": cats,
+            # 界面用：告诉用户这次参考了多少条他手动改过的归类
+            "learned": [{"file": n, "category": c, "was": o} for n, _s, c, o in corrections],
         })
         print_scheme(cats)
 
@@ -576,9 +695,12 @@ def do_apply():
 
     cache, keys = prepare_cache(files)
     rules = (config.get("custom_rules") or "").strip()
-    fp_hash = fingerprint(list(keys.values()), rules)
+    excel_path = folder / config.get("excel_name", "文件整理总表.xlsx")
+
+    corrections, has_baseline = collect_corrections(excel_path, files, cache, keys)
+    fp_hash = fingerprint(list(keys.values()), rules, examples_str(corrections))
     if scheme.get("fingerprint") != fp_hash:
-        print("提示：文件库或分类要求与生成方案时不同，将按当前文件库和这份方案归位。\n")
+        print("提示：文件库、分类要求或人工偏好与生成方案时不同，将按当前文件库和这份方案归位。\n")
 
     client = make_client(config)
     todo = pending_files(files, cache, keys)
@@ -587,20 +709,27 @@ def do_apply():
         run_analysis(config, files, cache, keys, client, rules)
         print()
 
+    if corrections:
+        print(f"已带上你手动调整过的 {len(corrections)} 条归类偏好辅助归位。")
+
     print(f"按确认后的方案归位（共 {len(cats)} 个分类）：")
     for c in cats:
         print(f"  - {c['name']}")
     model = config.get("model", "deepseek-chat")
-    mapping = assign_by_scheme(client, model, build_infos(files, cache, keys), cats, rules)
+    mapping = assign_by_scheme(client, model, build_infos(files, cache, keys), cats, rules, corrections)
     if not mapping:
         print("AI 归位失败，已改用每个文件各自的建议分类兜底。")
 
-    cache[GLOBAL_KEY] = {"fingerprint": fp_hash, "mapping": mapping, "scheme": cats}
+    set_baseline(cache, files, keys, mapping)   # 记录本轮 AI 结果，供下次识别"你改了哪几个"
+    cache[GLOBAL_KEY] = dict(cache[GLOBAL_KEY], fingerprint=fp_hash, mapping=mapping, scheme=cats)
     save_cache(cache)
 
-    excel_path, n_manual = write_final_excel(config, folder, files, cache, keys, mapping)
+    # 你手动改过的文件保留你的分类，其余严格按方案归位
+    keep_manual = ({file_key(n, s) for n, s, _c, _o in corrections}
+                   if has_baseline else None)
+    excel_path, n_manual = write_final_excel(config, folder, files, cache, keys, mapping, keep_manual)
     print(f"\n完成！总表已生成：{excel_path}")
-    print(f"分类来源：方案归位 {len(files) - n_manual} 个，保留人工修改 {n_manual} 个")
+    print(f"分类来源：方案归位 {len(files) - n_manual} 个，保留你手动修改的 {n_manual} 个")
     print("接下来：打开总表检查并修改分类，然后点「开始归档」。")
 
 
