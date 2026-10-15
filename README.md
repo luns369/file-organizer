@@ -42,7 +42,8 @@
 
 ## 快速开始（直接使用）
 
-1. 从 [Releases](../../releases) 下载 `AI文件整理助手_分发版.zip`，解压
+1. 从 [Releases](../../releases) 下载最新版的 `AI-File-Organizer-vX.Y.zip`，解压
+   （GitHub 不允许附件名用中文，所以压缩包是英文名；解压后里面就是 `AI文件整理助手.exe`）
 2. 双击 `AI文件整理助手.exe`（如弹 SmartScreen 警告：更多信息 → 仍要运行）
 3. 在打开的网页界面填写：要整理的文件夹路径 + 你的 DeepSeek API 密钥（[platform.deepseek.com](https://platform.deepseek.com) 注册创建）
 4. 点开始分析，完成后生成《文件整理总表.xlsx》
