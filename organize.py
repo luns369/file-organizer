@@ -8,7 +8,8 @@ AI 文件整理工具 —— 第二步：按 Excel 总表归档文件
 
 特点：
   - 移动（不是复制），归档后自动更新格子的文件链接，点击不会失效
-  - 每次归档都会写 undo.json 日志，可随时一键撤销
+  - 分类名支持两级「一级/二级」（如"学习/考公"）：自动创建两层文件夹，最多两层
+  - 每次归档都会写 undo.json 日志，可随时一键撤销（含清理空文件夹）
   - 重新归类：把文件格子剪切粘贴到另一列（或修改列表头），重跑本脚本即可
 """
 
@@ -30,11 +31,26 @@ else:
 CONFIG_FILE = BASE_DIR / "config.json"
 UNDO_FILE = BASE_DIR / "undo.json"
 
+MAX_LEVELS = 2      # 分类层级上限，与 main.py 保持一致
+DATA_START_ROW = 3  # 双行表头（一级 + 二级）时的数据起始行
+
 
 def sanitize(name):
     """去掉 Windows 文件夹名不允许的字符。"""
     name = re.sub(r'[\\/:*?"<>|]', "_", str(name)).strip().strip(".")
     return name or "未分类"
+
+
+def sanitize_rel(name, max_levels=MAX_LEVELS):
+    """把分类名变成相对目录路径：「学习/考公」→ 学习/考公（最多两级）。
+    每段单独清理非法字符，空段丢弃，防止路径穿越或过深嵌套。"""
+    raw = str(name or "")
+    for ch in ("\\", "／", "｜", "|", ">", "〉"):
+        raw = raw.replace(ch, "/")
+    parts = [sanitize(p) for p in raw.split("/") if p and p.strip()]
+    if not parts:
+        return Path("未分类")
+    return Path(*parts[:max_levels])
 
 
 def unique_path(target):
@@ -92,14 +108,28 @@ def do_organize():
     if "分类" in [c.value for c in ws[1]]:
         sys.exit("总表是旧版行式布局，请先运行  python main.py  重新生成新版总表（分类为列、每个文件一个格子）。")
 
+    # 判断表头是几行：第 2 行就有文件链接 = 旧版单行表头；否则为两级表头（第 1 行一级、第 2 行二级）
+    data_start = 2 if (ws.max_row >= 2 and any(path_from_cell(c) for c in ws[2])) else DATA_START_ROW
+
     # 矩阵布局：表头即分类，下面每个带超链接的格子是一个文件
     undo_log = []
+    top = ""
     for col_cells in ws.iter_cols(min_row=1):
-        header = col_cells[0].value
-        if not header:
+        if data_start == 2:
+            header = col_cells[0].value
+            cells = col_cells[1:]
+        else:
+            v1 = str(col_cells[0].value or "").strip()
+            if v1:
+                top = v1   # 一级表头是合并单元格，只有该级第一列有值，向后沿用
+            sub = str(col_cells[1].value or "").strip() if len(col_cells) > 1 else ""
+            header = f"{top}/{sub}" if sub else top
+            cells = col_cells[2:]
+        if not str(header or "").strip():
             continue
-        category = sanitize(str(header))
-        for cell in col_cells[1:]:
+        rel = sanitize_rel(header)          # 「学习/考公」→ 学习/考公
+        label = "/".join(rel.parts)
+        for cell in cells:
             p = path_from_cell(cell)
             if not p:
                 continue
@@ -107,7 +137,7 @@ def do_organize():
             if not src.exists():
                 print(f"跳过（文件不存在）：{src}")
                 continue
-            target_dir = folder / category
+            target_dir = folder / rel
             if src.parent == target_dir:
                 continue  # 已经在正确的文件夹里
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -115,7 +145,7 @@ def do_organize():
             shutil.move(str(src), str(dst))
             undo_log.append({"from": str(dst), "to": str(src)})
             cell.hyperlink = make_file_url(dst)
-            print(f"{src.name}  ->  {category}/")
+            print(f"{src.name}  ->  {label}/")
 
     try:
         wb.save(excel_path)
@@ -123,7 +153,8 @@ def do_organize():
         sys.exit("\n文件已移动，但总表正被打开无法更新链接。请关闭 Excel 后重新运行本脚本。")
 
     UNDO_FILE.write_text(json.dumps(undo_log, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\n归档完成！共移动 {len(undo_log)} 个文件。如需撤销：python organize.py undo")
+    print(f"\n归档完成！共移动 {len(undo_log)} 个文件到 {len({Path(i['from']).parent for i in undo_log})} 个分类文件夹。")
+    print("如需撤销：python organize.py undo")
 
 
 def do_undo():
@@ -136,10 +167,24 @@ def do_undo():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(unique_path(dst)))
             print(f"已恢复：{src.name}")
-    # 清理撤销后留下的空文件夹
-    for d in sorted({Path(i["from"]).parent for i in log}, key=lambda p: len(p.parts), reverse=True):
+    # 清理撤销后留下的空文件夹：两级目录要先删二级、再删一级
+    try:
+        folder = Path(load_config().get("source_folder", "") or "")
+        folder_key = os.path.normcase(str(folder))
+    except Exception:
+        folder, folder_key = None, None
+    dirs = set()
+    for i in log:
+        d = Path(i["from"]).parent
+        dirs.add(d)
+        if folder_key:
+            for anc in d.parents:          # 一路向上收集祖先目录，直到整理文件夹本身
+                if os.path.normcase(str(anc)) == folder_key:
+                    break
+                dirs.add(anc)
+    for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
         try:
-            d.rmdir()
+            d.rmdir()                      # 非空会失败，忽略即可
         except OSError:
             pass
     UNDO_FILE.unlink()

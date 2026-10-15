@@ -26,3 +26,4 @@ rebuild*.log
 # 本机开发测试脚本（含本机路径，不上传）
 test_*.py
 test_*.mjs
+test_*.log

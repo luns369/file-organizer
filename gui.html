@@ -138,6 +138,24 @@
   .unassigned { border: 1px dashed #f0b9b9; border-radius: 12px; padding: 12px 14px; background: #fff8f8; }
   .unassigned h3 { font-size: 13px; font-weight: 600; color: #b91c1c; margin-bottom: 8px; }
 
+  /* 第五档：一级分组（分类名「一级/二级」时按一级分组展示） */
+  .cat-group {
+    border: 1px solid var(--border); border-left: 4px solid var(--gc, var(--brand));
+    border-radius: 12px; padding: 11px 13px; margin-bottom: 12px; background: #fff;
+  }
+  .group-head { display: flex; gap: 8px; align-items: center; }
+  .group-head input.g-name {
+    flex: 1 1 150px; font-weight: 700; color: var(--gc, var(--text));
+    padding: 7px 10px; font-size: 14.5px;
+  }
+  .group-body {
+    display: flex; flex-direction: column; gap: 9px; margin-top: 11px;
+    padding-left: 10px; border-left: 2px dashed var(--border);
+  }
+  .group-body .cat { margin-bottom: 0; }
+  .cat-group.collapsed .group-body { display: none; }
+  .cat-group.collapsed > .group-head .cat-toggle { transform: rotate(-90deg); }
+
   /* 折叠：整张「分类方案」卡片 */
   .card h2.clickable { cursor: pointer; user-select: none; margin-bottom: 0; }
   .card h2.clickable .chev {
@@ -208,9 +226,18 @@
       <div class="hint">选中场景会自动填写下方的分类要求，可继续修改；它决定 AI 按什么维度设计分类。</div>
     </div>
     <div class="field">
+      <label for="level">分类层级（第五档：两级分类）</label>
+      <select id="level">
+        <option value="auto">自动（文件多时用两级，内容集中时只分一级）</option>
+        <option value="2">两级（一级/二级，如「学习/考公」）</option>
+        <option value="1">一级（全部平铺，不建子文件夹）</option>
+      </select>
+      <div class="hint">两级时归档会建「一级/二级」两层文件夹，总表表头也按两级展示。改这一项会自动重新设计分类方案。</div>
+    </div>
+    <div class="field">
       <label for="customRules">自定义分类要求</label>
       <textarea id="customRules" rows="4" placeholder="用大白话写要求，例如：按大一到大四的课程分开；所有简历单独一类；重复文件归到一起；分类控制在 8 类以内"></textarea>
-      <div class="hint">AI 分类时优先遵守这里的要求。修改后下次「开始分析」会自动重新做全局分类（逐文件结果仍走缓存，不重复消耗额度）。</div>
+      <div class="hint">AI 分类时优先遵守这里的要求，可以覆盖上面的层级与数量设定（例如写"不要子分类，只分一级"）。修改后下次「开始分析」会自动重新做全局分类（逐文件结果仍走缓存，不重复消耗额度）。</div>
     </div>
     <div style="text-align:right">
       <button class="btn primary small" id="btnSave" type="button">保存设置</button>
@@ -276,7 +303,7 @@
   </section>
 
   <footer>
-    建议流程：设置文件夹和密钥 → 开始分析 → 在「分类方案」里确认/修改 → 按方案生成总表 → 打开总表检查 → 开始归档 → 不满意可撤销。
+    建议流程：设置文件夹、密钥与分类层级 → 开始分析 → 在「分类方案」里确认/修改 → 按方案生成总表 → 打开总表检查 → 开始归档 → 不满意可撤销。
     <br>
     <button id="btnShutdown" type="button">关闭本服务</button>
   </footer>
@@ -340,7 +367,8 @@ function updateBadge(running) {
 $("btnSave").onclick = async () => {
   const body = {
     source_folder: $("folder").value.trim(),
-    custom_rules: $("customRules").value.trim()   // 允许清空，总是提交
+    custom_rules: $("customRules").value.trim(),   // 允许清空，总是提交
+    hierarchy_level: $("level").value
   };
   const key = $("apiKey").value.trim();
   if (key) body.api_key = key;
@@ -419,21 +447,45 @@ $("btnShutdown").onclick = async () => {
 };
 
 /* ================= 第三档：分类方案（确认后再生成总表） ================= */
-let SCHEME = [];      // [{uid, name, desc, files:[文件名]}]
+/* 第五档：分类名支持「一级/二级」，界面按一级分组展示 */
+let SCHEME = [];      // [{uid, name, desc, files:[文件名]}]，name 形如「学习/考公」或「工作」
 let ALL_FILES = [];   // 文件夹里所有可整理文件
 
-/* ---- 折叠状态：整张方案卡片 + 每个分类，存在浏览器本地 ---- */
+/* ---- 折叠状态：整张方案卡片 + 每个一级分组 + 每个分类，存在浏览器本地 ---- */
 const LS_CARD = "fo_scheme_collapsed";
 const LS_CATS = "fo_cat_collapsed";
-let COLLAPSED = new Set();   // 已收起的分类 uid
-let FOLD_NEW = false;        // true = 刚生成的新方案，加载后把所有分类默认收起
+const LS_GROUPS = "fo_group_collapsed";
+let COLLAPSED = new Set();    // 已收起的分类 uid
+let GCOLLAPSED = new Set();   // 已收起的一级分类名
+let FOLD_NEW = false;         // true = 刚生成的新方案，加载后把所有分类默认收起
 let UID_SEQ = 0;
 const newUid = () => "c" + (++UID_SEQ);   // uid 只在前端用，不提交给后端
+
+/* 一级分组配色，与 Excel 表头配色同系 */
+const GROUP_COLORS = ["#4472C4", "#70AD47", "#ED7D31", "#7030A0", "#2E9EA8", "#C00000", "#BF8F00", "#7F7F7F"];
+
+/* 拆「一级/二级」：单级分类的 sub 为空串 */
+function splitName(n) {
+  const p = String(n || "").split("/").map(s => s.trim()).filter(Boolean);
+  return { top: p[0] || "未命名", sub: p.slice(1).join("/") };
+}
+
+/* 按一级分类把 SCHEME 分组（保持原有顺序） */
+function buildGroups() {
+  const out = [], idx = {};
+  SCHEME.forEach((c, i) => {
+    const { top, sub } = splitName(c.name);
+    if (!(top in idx)) { idx[top] = out.length; out.push({ top, items: [] }); }
+    out[idx[top]].items.push({ i, sub });
+  });
+  return out;
+}
 
 function persistFoldUI() {
   try {
     localStorage.setItem(LS_CARD, $("schemeCard").classList.contains("collapsed") ? "1" : "0");
     localStorage.setItem(LS_CATS, JSON.stringify([...COLLAPSED]));
+    localStorage.setItem(LS_GROUPS, JSON.stringify([...GCOLLAPSED]));
   } catch (e) { /* 隐私模式等场景忽略即可 */ }
 }
 
@@ -441,11 +493,16 @@ function restoreFoldUI() {
   try {
     if (localStorage.getItem(LS_CARD) === "1") $("schemeCard").classList.add("collapsed");
     COLLAPSED = new Set(JSON.parse(localStorage.getItem(LS_CATS) || "[]"));
-  } catch (e) { COLLAPSED = new Set(); }
+    GCOLLAPSED = new Set(JSON.parse(localStorage.getItem(LS_GROUPS) || "[]"));
+  } catch (e) { COLLAPSED = new Set(); GCOLLAPSED = new Set(); }
 }
 
-function allCatsCollapsed() {
-  return SCHEME.length > 0 && SCHEME.every(c => COLLAPSED.has(c.uid));
+/* 是否已把所有分类和所有一级分组都收起了 */
+function allCollapsed() {
+  const gs = buildGroups();
+  return SCHEME.length > 0
+    && gs.every(g => GCOLLAPSED.has(g.top))
+    && SCHEME.every(c => COLLAPSED.has(c.uid));
 }
 
 function updateSchemeSum() {
@@ -453,9 +510,12 @@ function updateSchemeSum() {
   if (!el) return;
   if (!SCHEME.length) { el.textContent = ""; return; }
   const n = SCHEME.reduce((s, c) => s + (c.files || []).length, 0);
-  el.textContent = "· " + SCHEME.length + " 个分类 / " + n + " 个文件";
+  const gs = buildGroups();
+  const twoLevel = SCHEME.some(c => splitName(c.name).sub);
+  el.textContent = "· " + (twoLevel ? gs.length + " 个一级 / " + SCHEME.length + " 个分类" : SCHEME.length + " 个分类")
+                 + " / " + n + " 个文件";
   const btn = $("btnCollapseAll");
-  if (btn) btn.textContent = allCatsCollapsed() ? "全部展开" : "全部收起";
+  if (btn) btn.textContent = allCollapsed() ? "全部展开" : "全部收起";
 }
 
 const escapeHtml = s => String(s).replace(/[&<>"']/g,
@@ -484,6 +544,8 @@ async function loadScheme() {
     if (d.exists) {
       let meta = "方案生成时间：" + (d.created_at || "未知");
       if (d.edited_at) meta += "　最近修改：" + d.edited_at;
+      const lv = { "1": "只分一级", "2": "两级（一级/二级）" }[d.hierarchy_level] || "自动";
+      meta += "　分类层级：" + lv;
       if (d.rules) meta += "<br>生成时使用的分类要求：" + escapeHtml(d.rules);
       const learned = d.learned || [];
       if (learned.length) {
@@ -493,7 +555,7 @@ async function loadScheme() {
               + learned.length + ' 条归类偏好</span>：' + shown
               + (learned.length > 3 ? "　等" : "");
       }
-      meta += "<br>改名 / 增删 / 合并 / 移动文件后，点「按方案生成总表」即可按这份方案归位。";
+      meta += "<br>一级名在分组标题上改、二级名在分类卡里改；也可增删 / 合并 / 移动文件。改完点「按方案生成总表」。";
       $("schemeMeta").innerHTML = meta;
     } else {
       $("schemeMeta").textContent = "还没有分类方案。先点「开始分析」，AI 会给出分类方案供你确认。";
@@ -510,7 +572,7 @@ function renderScheme() {
     box.innerHTML = '<div class="scheme-empty">暂无方案内容。可点「＋ 添加分类」手动建一个，或先「开始分析」让 AI 生成。</div>';
     return;
   }
-  SCHEME.forEach((cat, ci) => box.appendChild(catBlock(cat, ci)));
+  buildGroups().forEach((g, gi) => box.appendChild(groupBlock(g, gi)));
   const un = unassignedFiles();
   if (un.length) {
     const wrap = document.createElement("div");
@@ -521,6 +583,65 @@ function renderScheme() {
     un.forEach(fn => wrap.appendChild(fileRow(fn, -1)));
     box.appendChild(wrap);
   }
+}
+
+/* 一级分组：组头（可改一级名 / 收起 / 删除整组）+ 组内的二级分类 */
+function groupBlock(g, gi) {
+  const collapsed = GCOLLAPSED.has(g.top);
+  const div = document.createElement("div");
+  div.className = "cat-group" + (collapsed ? " collapsed" : "");
+  div.style.setProperty("--gc", GROUP_COLORS[gi % GROUP_COLORS.length]);
+
+  const head = document.createElement("div");
+  head.className = "group-head";
+
+  const tg = document.createElement("button");
+  tg.type = "button"; tg.className = "cat-toggle g-toggle"; tg.textContent = "▾";
+  tg.title = collapsed ? "展开这个一级分类" : "收起这个一级分类";
+  tg.onclick = () => {
+    if (GCOLLAPSED.has(g.top)) GCOLLAPSED.delete(g.top);
+    else GCOLLAPSED.add(g.top);
+    persistFoldUI();
+    renderScheme();
+  };
+  head.appendChild(tg);
+
+  const name = document.createElement("input");
+  name.type = "text"; name.className = "g-name"; name.value = g.top;
+  name.placeholder = "一级分类名";
+  name.title = "改这里会同步修改这一组下所有分类的一级名";
+  name.oninput = () => {
+    const v = name.value.trim() || "未命名";
+    g.items.forEach(it => {
+      const sub = splitName(SCHEME[it.i].name).sub;   // 组内各分类的二级名保持不变
+      SCHEME[it.i].name = sub ? v + "/" + sub : v;
+    });
+  };
+  head.appendChild(name);
+
+  const stat = document.createElement("span");
+  stat.className = "cat-badge";
+  const nFiles = g.items.reduce((s, it) => s + (SCHEME[it.i].files || []).length, 0);
+  const nSub = g.items.filter(it => it.sub).length;
+  stat.textContent = (nSub ? nSub + " 个二级 · " : "") + nFiles + " 个文件";
+  head.appendChild(stat);
+
+  const del = document.createElement("button");
+  del.type = "button"; del.className = "btn warn small"; del.textContent = "删除整组";
+  del.onclick = () => {
+    if (!confirm("删除一级分类「" + g.top + "」及其下 " + g.items.length
+                 + " 个分类？这些文件会回到「未分配文件」区。")) return;
+    g.items.map(it => it.i).sort((a, b) => b - a).forEach(i => SCHEME.splice(i, 1));
+    renderScheme();
+  };
+  head.appendChild(del);
+  div.appendChild(head);
+
+  const body = document.createElement("div");
+  body.className = "group-body";
+  g.items.forEach(it => body.appendChild(catBlock(SCHEME[it.i], it.i)));
+  div.appendChild(body);
+  return div;
 }
 
 function catBlock(cat, ci) {
@@ -542,10 +663,16 @@ function catBlock(cat, ci) {
   };
   head.appendChild(toggle);
 
+  // 卡片里只编辑二级名（一级名在分组标题上改）；留空 = 这一级不再细分
   const name = document.createElement("input");
-  name.type = "text"; name.className = "cat-name"; name.value = cat.name;
-  name.placeholder = "分类名";
-  name.oninput = () => { SCHEME[ci].name = name.value; };
+  name.type = "text"; name.className = "cat-name";
+  name.value = splitName(cat.name).sub;
+  name.placeholder = "二级分类名（留空 = 不再细分）";
+  name.oninput = () => {
+    const v = name.value.trim();
+    const t = splitName(SCHEME[ci].name).top;
+    SCHEME[ci].name = v ? t + "/" + v : t;
+  };
   head.appendChild(name);
 
   const badge = document.createElement("span");
@@ -666,10 +793,16 @@ $("schemeHead").onclick = () => {
   persistFoldUI();
 };
 
-/* 一键收起 / 展开所有分类 */
+/* 一键收起 / 展开所有一级分组与分类 */
 $("btnCollapseAll").onclick = () => {
-  if (allCatsCollapsed()) SCHEME.forEach(c => COLLAPSED.delete(c.uid));
-  else SCHEME.forEach(c => COLLAPSED.add(c.uid));
+  const gs = buildGroups();
+  if (allCollapsed()) {
+    SCHEME.forEach(c => COLLAPSED.delete(c.uid));
+    gs.forEach(g => GCOLLAPSED.delete(g.top));
+  } else {
+    SCHEME.forEach(c => COLLAPSED.add(c.uid));
+    gs.forEach(g => GCOLLAPSED.add(g.top));
+  }
   persistFoldUI();
   renderScheme();
 };

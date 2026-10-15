@@ -74,6 +74,10 @@ def save_config(data):
     # custom_rules（自定义分类要求）允许清空：只要提交了该字段就覆盖
     if "custom_rules" in data:
         cfg["custom_rules"] = str(data["custom_rules"]).strip()
+    # hierarchy_level（分类层级）：auto（自动）/ 2（两级「一级/二级」）/ 1（只分一级）
+    if "hierarchy_level" in data:
+        v = str(data["hierarchy_level"]).strip()
+        cfg["hierarchy_level"] = v if v in ("auto", "1", "2") else "auto"
     CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     return cfg
 
@@ -98,14 +102,23 @@ def load_scheme():
     return {}
 
 
+def norm_category(name):
+    """轻量规范化分类名（与 main.py 的层级规则一致）：统一分隔符、去空白、最多两级。"""
+    raw = str(name or "")
+    for ch in ("\\", "／", "｜", "|", ">", "〉"):
+        raw = raw.replace(ch, "/")
+    return "/".join([p.strip() for p in raw.split("/") if p and p.strip()][:2])
+
+
 def save_scheme(data):
     """保存（可能被人工改过的）分类方案，保留原有的指纹与规则信息。"""
     scheme = load_scheme() or {}
-    cats = []
+    cats, seen = [], set()
     for c in (data.get("categories") or []):
-        name = str(c.get("name", "")).strip()
-        if not name:
+        name = norm_category(c.get("name", ""))
+        if not name or name in seen:
             continue
+        seen.add(name)
         cats.append({
             "name": name,
             "desc": str(c.get("desc", "")).strip(),
@@ -216,6 +229,7 @@ class Handler(BaseHTTPRequestHandler):
                 "model": cfg.get("model", "deepseek-chat"),
                 "excel_name": cfg.get("excel_name", "文件整理总表.xlsx"),
                 "custom_rules": cfg.get("custom_rules", ""),
+                "hierarchy_level": cfg.get("hierarchy_level", "auto"),
                 "running": _state["running"],
             }, ensure_ascii=False))
         elif self.path.startswith("/api/log/"):
@@ -235,6 +249,7 @@ class Handler(BaseHTTPRequestHandler):
                 "exists": bool(scheme.get("categories")),
                 "fingerprint": scheme.get("fingerprint", ""),
                 "rules": scheme.get("rules", ""),
+                "hierarchy_level": scheme.get("hierarchy_level", ""),
                 "created_at": scheme.get("created_at", ""),
                 "edited_at": scheme.get("edited_at", ""),
                 "categories": scheme.get("categories") or [],

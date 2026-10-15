@@ -6,7 +6,7 @@ AI 文件整理工具 —— 分析文件并生成 Excel 总表
     python main.py          第一步：扫描 + 逐文件分析 + 生成分类方案（等待确认）
     python main.py apply    第二步：按确认后的分类方案归位，生成 Excel 总表
 
-流程（第三档：方案先确认，再执行；第四档：学习人工修改）：
+流程（第三档：方案先确认，再执行；第四档：学习人工修改；第五档：两级分类）：
     扫描文件夹 → 提取文字内容 → DeepSeek 逐文件分析（关键词/总结）
     → DeepSeek 只给出「分类方案」（分类名 + 定义边界 + 预计包含哪些文件）
     → 在网页界面上确认/修改方案（改名、增删、合并、调整文件归属）
@@ -15,6 +15,7 @@ AI 文件整理工具 —— 分析文件并生成 Excel 总表
 特点：
   - 已分析过的文件会写入 cache.json，重复运行不再消耗 API 费用
   - 分类方案写入 scheme.json，可反复修改确认；文件库或分类要求变化时会提示重新生成
+  - 分类名支持两级「一级/二级」（如"学习/考公"）：归档建两层文件夹，总表按两级展示
   - 总表为矩阵布局：每个分类一列，每个文件一个格子，点击格子直接打开文件
   - 你在总表里手动改过的分类会被记为「归类偏好」（cache.json 的 baseline 对比得出），
     下一轮注入提示词，AI 越用越准；这些文件归位时也永远保留你的分类
@@ -53,6 +54,11 @@ MAX_TEXT_CHARS = 4000  # 发给 AI 的内容上限，控制 token 消耗
 # 失败结果会被永久缓存，之后每次运行都"缓存命中"直接跳过，永远无法恢复
 FAIL_CATEGORIES = {"分析失败", "解析失败", "无法识别"}
 MAX_EXAMPLES = 20  # 最多给 AI 看多少条「人工纠正」示例，控制 token 消耗
+
+# 第五档：两级/层级分类
+MAX_LEVELS = 2             # 分类层级上限：一级（"学习"）或两级（"学习/考公"）
+DEFAULT_MAX_PRIMARY = 8    # 一级分类数量上限（默认规则，可被用户的额外要求覆盖）
+DEFAULT_MAX_SECONDARY = 6  # 每个一级分类下的二级数量上限（同上）
 
 
 # ---------------- 配置与缓存 ----------------
@@ -102,6 +108,59 @@ def build_rules_block(rules):
     if not rules:
         return ""
     return f"用户额外要求（优先级最高，分类时必须遵守；与默认规则冲突时以本要求为准）：\n{rules}\n\n"
+
+
+# ---------------- 第五档：两级/层级分类 ----------------
+def split_levels(category, max_levels=MAX_LEVELS):
+    """把分类名拆成层级列表：统一分隔符、去空白、丢空段、限制层数。
+    「学习 / 考公」「学习／考公」「学习 > 考公」都会拆成 ["学习", "考公"]。"""
+    raw = str(category or "")
+    for ch in ("\\", "／", "｜", "|", ">", "〉"):
+        raw = raw.replace(ch, "/")
+    parts = [p.strip() for p in raw.split("/") if p and p.strip()]
+    return parts[:max_levels] if parts else []
+
+
+def normalize_category(category, max_levels=MAX_LEVELS):
+    """规范化分类名：统一成分隔符为「/」的层级路径，最多两级；空名视为「未分类」。"""
+    parts = split_levels(category, max_levels)
+    if not parts:
+        return "未分类"
+    if len(parts) > 1 and parts[-1] == "未分类":
+        parts = parts[:-1]          # "学习/未分类" 收敛成 "学习"
+    return "/".join(parts)
+
+
+def top_of(category):
+    """取一级分类名。"""
+    parts = split_levels(category)
+    return parts[0] if parts else "未分类"
+
+
+def sub_of(category):
+    """取二级分类名（单级分类返回空串）。"""
+    parts = split_levels(category)
+    return "/".join(parts[1:])
+
+
+def build_level_block(level="auto", max_primary=DEFAULT_MAX_PRIMARY, max_secondary=DEFAULT_MAX_SECONDARY):
+    """第五档：默认的「分类层级与数量」规则段。
+    它排在 build_rules_block() 的「用户额外要求」之前，因此用户可以用大白话
+    覆盖它（例如"不要子分类，只分一级""分类不要超过 6 个"），优先级逻辑不变。"""
+    level = str(level or "auto").strip()
+    if level == "1":
+        return ("默认分类结构：只分一级，不要子分类。\n"
+                "- 分类名是一个 2-8 个字的简短中文词，名字里不要出现「/」；\n"
+                f"- 分类数量控制在 4-{max_primary} 个，互斥、粒度适中。\n\n")
+    if level == "2":
+        return ("默认分类结构：两级（一级/二级），分类名必须写成「一级/二级」形式。\n"
+                f"- 一级分类 3-{max_primary} 个，按内容领域或使用场景划分的大类；\n"
+                f"- 每个一级分类下 1-{max_secondary} 个二级分类，二级名写在后面、用单个「/」连接（如「学习/考公」）；\n"
+                "- 一级名和二级名都是 2-8 个字的简短中文词；层级最多两层，不要出现两个「/」。\n\n")
+    return ("默认分类结构：内容跨度大、文件多时用两级「一级/二级」，内容集中、文件少时只分一级。\n"
+            f"- 若用两级：一级 3-{max_primary} 个、每个一级下 1-{max_secondary} 个二级，写成「一级/二级」（如「学习/考公」）；\n"
+            "- 若用一级：分类名直接写 2-8 个字的简短中文词，不要出现「/」；\n"
+            "- 层级最多两层，不要出现两个「/」。\n\n")
 
 
 def build_examples_block(examples):
@@ -191,57 +250,101 @@ def path_from_cell(cell):
     return unquote(t)
 
 
+# 一级分类配色（深色表头 + 同色系浅色二级表头），超过 8 个一级分类则循环使用
+HEADER_PALETTE = [
+    ("4472C4", "DCE6F5"), ("70AD47", "E2EFDA"), ("ED7D31", "FCE4D6"), ("7030A0", "E4DAF0"),
+    ("2E9EA8", "D9EEF0"), ("C00000", "F8D7D7"), ("BF8F00", "FFF2CC"), ("7F7F7F", "E7E6E6"),
+]
+DATA_START_ROW = 3  # 第 1 行一级分类、第 2 行二级分类，文件从第 3 行开始
+
+
 def write_excel(excel_path, rows):
-    """矩阵布局：每个分类一列，每个文件一个格子；格子本身是可点击的文件链接。"""
+    """矩阵布局：每个分类一列，每个文件一个格子；格子本身是可点击的文件链接。
+    第五档：分类名可以是「一级/二级」——同属一个一级分类的列，表头横向合并、同一配色，
+    第 1 行写一级名、第 2 行写二级名（单级分类的第 2 行留空）。"""
     wb = Workbook()
     ws = wb.active
     ws.title = "文件总表"
 
     groups = {}
     for r in rows:
-        groups.setdefault(r["category"], []).append(r)
+        groups.setdefault(normalize_category(r["category"]), []).append(r)
 
-    header_fill = PatternFill("solid", fgColor="4472C4")
-    header_font = Font(bold=True, color="FFFFFF")
+    # 排序：先按一级分类的文件总数降序，同一级内再按二级的文件数降序
+    top_size = {}
+    for cat, items in groups.items():
+        top_size[top_of(cat)] = top_size.get(top_of(cat), 0) + len(items)
+    categories = sorted(groups, key=lambda c: (-top_size[top_of(c)], top_of(c),
+                                               -len(groups[c]), c))
+
     wrap_top = Alignment(wrap_text=True, vertical="top")
     thin = Side(style="thin", color="BFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    # 文件多的分类排前面，方便查看
-    categories = sorted(groups, key=lambda c: (-len(groups[c]), c))
+    top_color = {}   # 一级分类 → 调色板下标，保证同名一级始终同色
     row_lines = {}
-    for col, category in enumerate(categories, start=1):
-        h = ws.cell(row=1, column=col, value=category)
-        h.fill = header_fill
-        h.font = header_font
-        h.alignment = Alignment(horizontal="center", vertical="center")
-        ws.column_dimensions[get_column_letter(col)].width = 46
+    col = 1
+    i = 0
+    while i < len(categories):
+        top = top_of(categories[i])
+        j = i
+        while j < len(categories) and top_of(categories[j]) == top:
+            j += 1
+        idx = top_color.setdefault(top, len(top_color))
+        deep, light = HEADER_PALETTE[idx % len(HEADER_PALETTE)]
+        span = j - i
 
-        for row_i, r in enumerate(sorted(groups[category], key=lambda x: x["name"].lower()), start=2):
-            text = (f"{r['name']}\n"
-                    f"关键词：{'、'.join(r['keywords'])}\n"
-                    f"总结：{r['summary']}\n"
-                    f"修改日期：{r['mtime_str']}")
-            c = ws.cell(row=row_i, column=col, value=text)
-            c.alignment = wrap_top
-            c.border = border
-            c.hyperlink = make_file_url(r["path"])  # 点击格子直接打开文件
-            # 估算这个格子需要的行数（文件名和总结会折行）
-            lines = math.ceil(len(r["name"]) / 20) + math.ceil(len(r["summary"]) / 20) + 2
-            row_lines[row_i] = max(row_lines.get(row_i, 0), lines)
+        # 第 1 行：一级分类（跨列合并）
+        if span > 1:
+            ws.merge_cells(start_row=1, start_column=col, end_row=1, end_column=col + span - 1)
+        h1 = ws.cell(row=1, column=col, value=top)
+        h1.fill = PatternFill("solid", fgColor=deep)
+        h1.font = Font(bold=True, color="FFFFFF", size=12)
+        h1.alignment = Alignment(horizontal="center", vertical="center")
+
+        # 第 2 行：二级分类（单级分类留空）
+        for k in range(i, j):
+            sub = sub_of(categories[k])
+            h2 = ws.cell(row=2, column=col + (k - i), value=sub or None)
+            h2.fill = PatternFill("solid", fgColor=light)
+            h2.font = Font(bold=True, color=deep, size=11)
+            h2.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        for k in range(i, j):
+            c = col + (k - i)
+            ws.column_dimensions[get_column_letter(c)].width = 46
+            for row_i, r in enumerate(sorted(groups[categories[k]], key=lambda x: x["name"].lower()),
+                                      start=DATA_START_ROW):
+                text = (f"{r['name']}\n"
+                        f"关键词：{'、'.join(r['keywords'])}\n"
+                        f"总结：{r['summary']}\n"
+                        f"修改日期：{r['mtime_str']}")
+                cell = ws.cell(row=row_i, column=c, value=text)
+                cell.alignment = wrap_top
+                cell.border = border
+                cell.hyperlink = make_file_url(r["path"])  # 点击格子直接打开文件
+                # 估算这个格子需要的行数（文件名和总结会折行）
+                lines = math.ceil(len(r["name"]) / 20) + math.ceil(len(r["summary"]) / 20) + 2
+                row_lines[row_i] = max(row_lines.get(row_i, 0), lines)
+
+        col += span
+        i = j
 
     for row_i, lines in row_lines.items():
         ws.row_dimensions[row_i].height = lines * 14 + 8
     ws.row_dimensions[1].height = 24
-    ws.freeze_panes = "A2"
+    ws.row_dimensions[2].height = 21
+    ws.freeze_panes = f"A{DATA_START_ROW}"
     wb.save(excel_path)
 
 
 # ---------------- 分类方案：先出方案，确认后归位（第三档） ----------------
-def fingerprint(keys, rules="", examples_str=""):
-    """文件库指纹：文件有增删改、自定义要求或人工偏好变化时，自动重新做一次全局分类。"""
+def fingerprint(keys, rules="", examples_str="", level="auto"):
+    """文件库指纹：文件有增删改、自定义要求、分类层级或人工偏好变化时，
+    自动重新做一次全局分类。"""
     raw = ("\n".join(sorted(keys))
            + "\n@@rules@@\n" + (rules or "").strip()
+           + "\n@@level@@\n" + str(level or "auto")
            + "\n@@examples@@\n" + (examples_str or "").strip())
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
@@ -320,13 +423,16 @@ def set_baseline(cache, files, file_keys, mapping):
 
 
 def clean_categories(raw_categories, infos):
-    """规范化 AI 返回的分类列表：去空名、去重名、把文件编号翻译成文件名。"""
+    """规范化 AI 返回的分类列表：去空名、去重名、统一层级写法、把文件编号翻译成文件名。"""
     out, seen = [], set()
     for c in raw_categories or []:
         if not isinstance(c, dict):
             continue
-        name = str(c.get("name", "")).strip()
-        if not name or name in seen:
+        raw_name = str(c.get("name", "")).strip()
+        if not raw_name:
+            continue
+        name = normalize_category(raw_name)   # 第五档：「学习 / 考公」→「学习/考公」
+        if name in seen:
             continue
         seen.add(name)
         names = []
@@ -364,21 +470,22 @@ def _file_lines(infos):
     )
 
 
-def propose_scheme(client, model, infos, rules="", examples=None):
+def propose_scheme(client, model, infos, rules="", examples=None, level="auto"):
     """第一步：只让 AI 给出分类方案（分类名 + 定义边界 + 预计包含哪些文件）。
+    分类名可以是两级路径「一级/二级」（第五档）。
     返回 [{name, desc, files:[文件名]}]；失败返回 []，由调用方兜底。"""
     prompt = f"""这是一个文件夹里全部 {len(infos)} 个文件的信息：
 
 {_file_lines(infos)}
 
-{build_rules_block(rules)}{build_examples_block(examples)}请先只设计一套分类方案，不要急着下最终结论。要求：
-1. 设计 5-12 个分类（若上方用户要求对数量、粒度、分类维度另有说明，以用户要求为准），互斥、粒度适中；
-2. 分类名为 2-8 个字的简短中文词，从内容领域或使用场景命名，概括内容主题，不要照抄文件名或文件夹名；
+{build_level_block(level)}{build_rules_block(rules)}{build_examples_block(examples)}请先只设计一套分类方案，不要急着下最终结论。要求：
+1. 按上面的默认分类结构（层级与数量）设计互斥、粒度适中的分类；用户额外要求与默认结构冲突时，以用户要求为准；
+2. 分类名从内容领域或使用场景命名，概括内容主题，不要照抄文件名或文件夹名；两级结构的名字写成「一级/二级」（如「学习/考公」）；
 3. 每个分类给出"定义边界"：一句话说明这一类装什么、与相邻分类怎么区分，30 字以内；
 4. 给出预计归入该分类的文件编号，同一个编号不要重复出现在多个分类，尽量覆盖所有文件编号。
 
 严格按以下 JSON 格式返回，不要输出其他内容：
-{{"categories": [{{"name": "分类名", "desc": "定义边界", "files": [1, 5, 7]}}]}}"""
+{{"categories": [{{"name": "学习/考公", "desc": "定义边界", "files": [1, 5, 7]}}]}}"""
     try:
         data = _chat_json(
             client, model,
@@ -391,23 +498,25 @@ def propose_scheme(client, model, infos, rules="", examples=None):
         return []
 
 
-def assign_by_scheme(client, model, infos, categories, rules="", examples=None):
+def assign_by_scheme(client, model, infos, categories, rules="", examples=None, level="auto"):
     """第二步：按用户确认后的分类方案，把每个文件归位。
     返回 {文件编号: 分类名}；方案外的名字一律落到"未分类"。"""
+    cats = [{"name": normalize_category(c["name"]), "desc": c.get("desc") or ""}
+            for c in categories if str(c.get("name", "")).strip()]
     cat_lines = "\n".join(
-        f"- {c['name']}：{c.get('desc') or '（无说明）'}" for c in categories
+        f"- {c['name']}：{c.get('desc') or '（无说明）'}" for c in cats
     )
     prompt = f"""这是一个文件夹里全部 {len(infos)} 个文件的信息：
 
 {_file_lines(infos)}
 
-用户已确认的分类方案（必须严格使用下列分类名，不得新增、改名或合并）：
+用户已确认的分类方案（必须严格使用下列分类名，不得新增、改名、合并，层级写法保持原样）：
 {cat_lines}
 
-{build_rules_block(rules)}{build_examples_block(examples)}请把每个文件归入上面方案中最合适的一类。内容相似的文件必须归入同一个分类；方案里确实没有合适归属的，才用"未分类"。
+{build_level_block(level)}{build_rules_block(rules)}{build_examples_block(examples)}请把每个文件归入上面方案中最合适的一类。内容相似的文件必须归入同一个分类；方案里确实没有合适归属的，才用"未分类"。
 
-严格按以下 JSON 格式返回，键是文件编号（每个文件都要有）：
-{{"assignments": {{"1": "分类名", "2": "分类名"}}}}"""
+严格按以下 JSON 格式返回，键是文件编号（每个文件都要有），值是上面方案里的分类名：
+{{"assignments": {{"1": "学习/考公", "2": "工作/项目文档"}}}}"""
     try:
         data = _chat_json(
             client, model,
@@ -415,11 +524,15 @@ def assign_by_scheme(client, model, infos, categories, rules="", examples=None):
             prompt,
         )
         raw = data.get("assignments", data)
-        valid = {c["name"] for c in categories}
+        valid = {c["name"] for c in cats}
         result = {}
         for k, v in raw.items():
-            name = str(v).strip()
-            result[str(k)] = name if name in valid else "未分类"
+            name = normalize_category(v)
+            if name not in valid:
+                # 退一步：只给了一级名（或层级写法不同）时，若该一级下有唯一二级，就认它
+                matches = [n for n in valid if top_of(n) == name]
+                name = matches[0] if len(matches) == 1 else "未分类"
+            result[str(k)] = name
         return result
     except Exception as e:
         print(f"按方案归位失败，改用每个文件各自的建议分类。原因：{e}")
@@ -460,9 +573,19 @@ def fallback_scheme(files, cache, keys):
             for n, fs in sorted(groups.items(), key=lambda x: -len(x[1]))]
 
 
+def matrix_data_start(ws):
+    """矩阵总表的数据起始行。
+    第 2 行就带文件链接 = 旧版单行表头（表头只有分类名一行）；
+    否则是第五档的双行表头（第 1 行一级分类、第 2 行二级分类）。"""
+    if ws.max_row >= 2 and any(path_from_cell(c) for c in ws[2]):
+        return 2
+    return DATA_START_ROW
+
+
 def load_manual_categories(excel_path):
     """读取已有总表里人工调整过的分类，重跑时保留。
-    返回两个字典：按路径匹配（新版矩阵布局）、按 文件名+总结 匹配（旧版行式布局）。"""
+    返回两个字典：按路径匹配（矩阵布局）、按 文件名+总结 匹配（旧版行式布局）。
+    兼容三种表头：旧版行式、单行表头的矩阵、双行表头的两级矩阵。"""
     by_path, by_namesum = {}, {}
     if not excel_path.exists():
         return by_path, by_namesum
@@ -477,15 +600,24 @@ def load_manual_categories(excel_path):
                     key = (str(row[h["文件名"]]), str(row[h["一句话总结"]] or ""))
                     by_namesum[key] = str(row[h["分类"]])
         else:
-            # 新版矩阵布局：表头即分类，带超链接的格子即文件
+            # 矩阵布局：表头即分类，带超链接的格子即文件
+            start = matrix_data_start(ws)
+            top = ""
             for col_cells in ws.iter_cols(min_row=1):
-                category = col_cells[0].value
+                if start == 2:
+                    category = str(col_cells[0].value or "").strip()
+                else:
+                    v1 = str(col_cells[0].value or "").strip()
+                    if v1:
+                        top = v1   # 一级表头是合并单元格，只有该级第一列有值，向后沿用
+                    sub = str(col_cells[1].value or "").strip() if len(col_cells) > 1 else ""
+                    category = f"{top}/{sub}" if sub else top
                 if not category:
                     continue
-                for c in col_cells[1:]:
+                for c in col_cells[start - 1:]:
                     p = path_from_cell(c)
                     if p:
-                        by_path[norm_path(p)] = str(category)
+                        by_path[norm_path(p)] = category
     except Exception as e:
         # 读不出来就中止，而不是重新生成——否则你手动改过的分类会被静默覆盖
         sys.exit(f"无法读取已有总表：{e}\n请关闭 Excel/WPS 里打开的总表后重新运行。（为保护你手动改过的分类，本次未重新生成）")
@@ -625,6 +757,7 @@ def do_analyze():
 
     cache, keys = prepare_cache(files)
     rules = (config.get("custom_rules") or "").strip()
+    level = str(config.get("hierarchy_level", "auto") or "auto")
     excel_path = folder / config.get("excel_name", "文件整理总表.xlsx")
 
     # 第四档：先看你上次在总表里手动改过什么，作为分类偏好喂给 AI
@@ -641,7 +774,7 @@ def do_analyze():
         if n:
             print(f"已把现有总表里的 {n} 个分类记录为基线，你之后再改动总表就会被学习到。\n")
 
-    fp_hash = fingerprint(list(keys.values()), rules, examples_str(corrections))
+    fp_hash = fingerprint(list(keys.values()), rules, examples_str(corrections), level)
     todo = pending_files(files, cache, keys)
 
     scheme = load_scheme()
@@ -656,22 +789,24 @@ def do_analyze():
         print()
 
     if scheme_fresh:
-        print("分类方案已是最新（文件库、分类要求与分类偏好都没变化），直接复用。")
+        print("分类方案已是最新（文件库、分类要求、分类层级与分类偏好都没变化），直接复用。")
         print_scheme(scheme["categories"])
     else:
         print("正在根据整个文件库设计分类方案……")
+        print("分类层级：" + {"1": "只分一级", "2": "两级（一级/二级）"}.get(level, "自动（由 AI 判断）"))
         if rules:
             print("已加载自定义分类要求")
         if corrections:
             print(f"已带入 {len(corrections)} 条你的历史归类偏好")
         model = config.get("model", "deepseek-chat")
-        cats = propose_scheme(client, model, build_infos(files, cache, keys), rules, corrections)
+        cats = propose_scheme(client, model, build_infos(files, cache, keys), rules, corrections, level)
         if not cats:
             print("已改用每个文件各自的建议分类，拼出一个初始方案，请手工调整。")
             cats = fallback_scheme(files, cache, keys)
         save_scheme({
             "fingerprint": fp_hash,
             "rules": rules,
+            "hierarchy_level": level,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "categories": cats,
             # 界面用：告诉用户这次参考了多少条他手动改过的归类
@@ -689,18 +824,28 @@ def do_apply():
     folder, files = collect_files(config)
 
     scheme = load_scheme()
-    cats = [c for c in (scheme.get("categories") or []) if str(c.get("name", "")).strip()]
+    # 分类名统一成「一级/二级」写法并去重（方案可能被手工编辑过）
+    cats, seen = [], set()
+    for c in (scheme.get("categories") or []):
+        if not str(c.get("name", "")).strip():
+            continue
+        name = normalize_category(c.get("name"))
+        if name in seen:
+            continue
+        seen.add(name)
+        cats.append({"name": name, "desc": str(c.get("desc", "")).strip()})
     if not cats:
         sys.exit("还没有分类方案。请先点「开始分析」生成方案，确认后再点「按方案生成总表」。")
 
     cache, keys = prepare_cache(files)
     rules = (config.get("custom_rules") or "").strip()
+    level = str(config.get("hierarchy_level", "auto") or "auto")
     excel_path = folder / config.get("excel_name", "文件整理总表.xlsx")
 
     corrections, has_baseline = collect_corrections(excel_path, files, cache, keys)
-    fp_hash = fingerprint(list(keys.values()), rules, examples_str(corrections))
+    fp_hash = fingerprint(list(keys.values()), rules, examples_str(corrections), level)
     if scheme.get("fingerprint") != fp_hash:
-        print("提示：文件库、分类要求或人工偏好与生成方案时不同，将按当前文件库和这份方案归位。\n")
+        print("提示：文件库、分类要求、分类层级或人工偏好与生成方案时不同，将按当前文件库和这份方案归位。\n")
 
     client = make_client(config)
     todo = pending_files(files, cache, keys)
@@ -716,7 +861,7 @@ def do_apply():
     for c in cats:
         print(f"  - {c['name']}")
     model = config.get("model", "deepseek-chat")
-    mapping = assign_by_scheme(client, model, build_infos(files, cache, keys), cats, rules, corrections)
+    mapping = assign_by_scheme(client, model, build_infos(files, cache, keys), cats, rules, corrections, level)
     if not mapping:
         print("AI 归位失败，已改用每个文件各自的建议分类兜底。")
 
